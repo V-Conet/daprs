@@ -1,0 +1,28 @@
+[server]
+# 协议版本
+version = 1
+# 为 webui 前端提供 API
+bind = "0.0.0.0:8080"
+# 用于 Server/Agent 之间的认证
+api_token = "TOKEN"
+# keepalive time in seconds
+alive = 60
+servers = [
+    { name = "local", address = "127.0.0.1:9813" },
+    # { name = "server2", address = "IP_ADDRESS:PORT" },
+]
+
+## provide API for webui
+[web]
+## todo: should have a on/off for webui api
+#enable = true
+
+# oauth2
+client_id = "KEY"
+client_secret = "SECRET"
+# 认证服务器地址
+oauth_provider = "https://auth.iedon.net/.well-known/openid-configuration"
+# 认证回调地址
+redirect_uri = "http://localhost:8080/api/login/callback"
+# 前端
+frontend_origin = "http://localhost:5173"
