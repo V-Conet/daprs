@@ -6,11 +6,11 @@ use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-use crate::{config::Config};
+use crate::{cmd::cmd_handler, config::Config};
 
 mod api;
-mod cmd;
 mod cli;
+mod cmd;
 mod config;
 mod wb;
 
@@ -30,19 +30,12 @@ async fn run() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let listener = TcpListener::bind(&config.agent.bind).await?;
-    
+
     // todo: API_TOKEN auth between server and agent
     let app = axum::Router::new()
         .route("/health", get(|| async { "OK" }))
         .route("/config", get(api::get_config))
-
-        // TODO: we need to use post with custom headers instead of /CMD/stuff for better security
-        // so that, the variant of CMD can be handled by only one CMD route
-        // for simplicity and flexibility, different CMD will be indicated by path
-        .route("/ping/{arg}", get(cmd::get_ping))
-        .route("/ping4/{arg}", get(cmd::get_ping4))
-        .route("/ping6/{arg}", get(cmd::get_ping6))
-
+        .route("/cmd", post(cmd_handler))
         // TODO, more CMDs, like traceroute, wg show, etc.
         // ref: `docs/dn42-bot`
         .route("/create_peer", post(wb::create_config))

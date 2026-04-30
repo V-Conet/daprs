@@ -1,5 +1,5 @@
 # DAPRS
 
-DN42 AutoPeering Bot/Agent/WebUI written in Rust.
+DN42 AutoPeering Agent/WebUI written in Rust.
 
 WIP

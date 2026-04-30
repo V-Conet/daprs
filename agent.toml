@@ -3,9 +3,9 @@
 bind = "0.0.0.0:9813"
 # server/agent 认证 token
 api_token = "TOKEN"
-# WireGuard / Bird 配置写入位置
-wg_config_path = "./data/wireguard"
-bird_config_path = "./data/bird"
+# 生成的 WireGuard / Bird 配置写入路径
+wg_path = "/path/to/wg"
+bird_path = "/path/to/bird"
 # 协议版本
 version = 1
 # 是否开放对外peering

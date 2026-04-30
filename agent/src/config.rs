@@ -47,10 +47,8 @@ pub struct AgentConfig {
     pub is_open: bool,
     pub is_verify: bool,
     pub extra_msg: String,
-    #[serde(default = "default_wg_config_path")]
-    pub wg_config_path: String,
-    #[serde(default = "default_bird_config_path")]
-    pub bird_config_path: String,
+    pub wg_path: String,
+    pub bird_path: String,
     pub net: NetConfig,
     pub dn42: Dn42Config,
 }
@@ -79,13 +77,4 @@ pub struct FrontendConfig {
     pub extra_msg: String,
     pub net: NetConfig,
     pub dn42: Dn42Config,
-}
-// FIXME: the path shouldnt be here, it is defined in config.toml,
-// write all conf to PATH_TO_CONFIG_WG/peerasn.conf for example
-fn default_wg_config_path() -> String {
-    "./data/wireguard-peer.conf".to_string()
-}
-
-fn default_bird_config_path() -> String {
-    "./data/bird-peer.conf".to_string()
 }

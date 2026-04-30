@@ -87,7 +87,12 @@ pub async fn login_callback(
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
 
-    let userinfo = fetch_userinfo(&http_client, &oauth.discovery, token.access_token().secret()).await?;
+    let userinfo = fetch_userinfo(
+        &http_client,
+        &oauth.discovery,
+        token.access_token().secret(),
+    )
+    .await?;
 
     let session_id = CsrfToken::new_random().secret().to_string();
     let now = now_unix_secs();
@@ -137,9 +142,7 @@ pub async fn logout(
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().append(
         header::SET_COOKIE,
-        HeaderValue::from_static(
-            "daprs_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
-        ),
+        HeaderValue::from_static("daprs_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"),
     );
     Ok(response)
 }
@@ -228,7 +231,8 @@ async fn fetch_userinfo(
 }
 
 fn require_session(state: &AppState, headers: &HeaderMap) -> Result<OAuthSession, StatusCode> {
-    let session_id = extract_cookie(headers, SESSION_COOKIE_NAME).ok_or(StatusCode::UNAUTHORIZED)?;
+    let session_id =
+        extract_cookie(headers, SESSION_COOKIE_NAME).ok_or(StatusCode::UNAUTHORIZED)?;
     let tree = state
         .db
         .open_tree(OAUTH_SESSION_TREE)
@@ -318,12 +322,7 @@ fn build_session_cookie(session_id: &str, web: &WebConfig) -> Result<HeaderValue
     let secure_attr = if secure { "; Secure" } else { "" };
     let cookie = format!(
         "{}={}; Path=/; Max-Age={}; HttpOnly{}{}{}",
-        SESSION_COOKIE_NAME,
-        session_id,
-        SESSION_TTL_SECS,
-        same_site_attr,
-        secure_attr,
-        ""
+        SESSION_COOKIE_NAME, session_id, SESSION_TTL_SECS, same_site_attr, secure_attr, ""
     );
     HeaderValue::from_str(&cookie).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }

@@ -70,7 +70,7 @@ pub struct FrontendAgentConfig {
 
 // for create/modify peer, return the full wg/bird config
 // this method is under consideration, may be changed if we find a better way to handle peering config
-#[derive(Serialize,Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct WbConfig {
     pub wg_config: String,
     pub bird_config: String,

@@ -35,8 +35,6 @@ async fn run() -> Result<()> {
 
     let listener = TcpListener::bind(&state.config.server.bind).await?;
 
-
-
     //for index
     let index = Html(
         r#"
@@ -55,15 +53,16 @@ async fn run() -> Result<()> {
             </center>
             </body>
         </html>
-        "#.to_string()
+        "#
+        .to_string(),
     );
 
     // todo: API_TOKEN auth between server and agent
     let protected_api = axum::Router::new()
         .route("/", get(|| async { index }))
         .route("/api/nodes", get(handler::get_nodes))
-        .route("/api/peering", post(handler::post_peering))
         .route("/api/peers", get(handler::get_peers))
+        .route("/api/peering", post(handler::post_peering))
         .route("/api/modify", post(handler::post_modify))
         .route("/api/remove", post(handler::post_remove))
         .route_layer(middleware::from_fn_with_state(
@@ -83,9 +82,17 @@ async fn run() -> Result<()> {
     if let Some(web) = state.config.web.as_ref() {
         if let Some(origin) = web.frontend_origin.as_ref() {
             let cors = CorsLayer::new()
-                .allow_origin(origin.parse::<axum::http::HeaderValue>().map_err(|_| anyhow::anyhow!("invalid frontend_origin"))?)
+                .allow_origin(
+                    origin
+                        .parse::<axum::http::HeaderValue>()
+                        .map_err(|_| anyhow::anyhow!("invalid frontend_origin"))?,
+                )
                 .allow_credentials(true)
-                .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::OPTIONS,
+                ])
                 .allow_headers([
                     axum::http::header::AUTHORIZATION,
                     axum::http::header::CONTENT_TYPE,

@@ -6,10 +6,7 @@ use std::{
 use axum::{Json, extract::State, http::StatusCode};
 use serde::Serialize;
 
-use crate::{
-    api::*,
-    config::AppState,
-};
+use crate::{api::*, config::AppState};
 
 // TODO: probably return StatusCode instead of Json<bool> for better support for webui
 
@@ -25,12 +22,8 @@ pub async fn get_nodes(
 
     let mut nodes = BTreeMap::new();
     for server in &state.config.server.servers {
-        let (conf, online, error) = fetch_agent_config(
-            &client,
-            &state.config.server.api_token,
-            &server.address,
-        )
-        .await;
+        let (conf, online, error) =
+            fetch_agent_config(&client, &state.config.server.api_token, &server.address).await;
 
         nodes.insert(
             server.name.clone(),
@@ -175,7 +168,10 @@ async fn dispatch_create_peer(
         node,
         "/create_peer",
         &WbConfig {
-            wg_config: format!("# peering\n# is_mhp={} is_nhp={} policy={:?}\n", payload.is_mhp, payload.is_nhp, payload.policy),
+            wg_config: format!(
+                "# peering\n# is_mhp={} is_nhp={} policy={:?}\n",
+                payload.is_mhp, payload.is_nhp, payload.policy
+            ),
             bird_config: format!("# peering\n# policy={:?}\n", payload.policy),
         },
     )
@@ -192,7 +188,10 @@ async fn dispatch_modify_peer(
         node,
         "/modify_peer",
         &WbConfig {
-            wg_config: format!("# modify\n# is_mhp={} is_nhp={} policy={:?}\n", payload.is_mhp, payload.is_nhp, payload.policy),
+            wg_config: format!(
+                "# modify\n# is_mhp={} is_nhp={} policy={:?}\n",
+                payload.is_mhp, payload.is_nhp, payload.policy
+            ),
             bird_config: format!("# modify\n# policy={:?}\n", payload.policy),
         },
     )
