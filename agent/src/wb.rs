@@ -3,7 +3,7 @@
 use axum::{
     Json,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,16 +23,24 @@ pub async fn create_config(
     Json(config): Json<WbConfig>,
 ) -> Result<StatusCode, StatusCode> {
     require_api_token(&headers, &config_state)?;
-    // write_config_files(&config_state, &config)?;
 
-    // todo: this is a validation in C/S
-    println!(
-        "config writen:\n{}\n{}",
-        config.wg_config, config.bird_config
-    );
+    // FIXME: ALWAYS VALIDATE BEFORE WRITING
+    let asn = headers.get("asn").unwrap().to_str().unwrap();
+    let wg_path = format!("{}/dn42-{}.conf", config_state.agent.wg_path, asn);
+    match write_wg(&config.wg_config, &wg_path) {
+        Ok(_) => {
+            // debug
+            println!("config writen: {}", wg_path);
 
-    //return prober status code
-    Ok(StatusCode::OK)
+            Ok(StatusCode::OK)
+        }
+        Err(e) => {
+            eprintln!("Error writing config: {:?}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+
+    // ...
 }
 
 pub async fn modify_config(
@@ -41,14 +49,8 @@ pub async fn modify_config(
     Json(config): Json<WbConfig>,
 ) -> Result<StatusCode, StatusCode> {
     require_api_token(&headers, &config_state)?;
-    // write_config_files(&config_state, &config)?;
 
-    // todo: this is a validation in C/S
-    println!(
-        "config writen:\n{}\n{}",
-        config.wg_config, config.bird_config
-    );
-    Ok(StatusCode::OK)
+    todo!();
 }
 
 // whather above func will handle both create and modify or not
@@ -62,4 +64,16 @@ pub async fn delete_config(
     // print!("deleted config: {}, {}",config_state.agent.wg_path,config_state.agent.bird_path);
 
     Ok(StatusCode::OK)
+}
+
+fn write_wg(conf: &String, path: &str) -> Result<(), std::io::Error> {
+    std::fs::write(path, conf)?;
+
+    Ok(())
+}
+
+fn delete_conf(path: &str) -> Result<(), std::io::Error> {
+    std::fs::remove_file(path)?;
+
+    Ok(())
 }

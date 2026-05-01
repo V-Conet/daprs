@@ -1,17 +1,21 @@
 use anyhow::{Context, Result};
-use axum::routing::{delete, get, post};
+use axum::{
+    middleware,
+    routing::{delete, get, post},
+};
 use clap::Parser;
 use std::path::Path;
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-use crate::{cmd::cmd_handler, config::Config};
+use crate::{cmd::cmd_handler, config::Config, mw::auth_middleware};
 
 mod api;
 mod cli;
 mod cmd;
 mod config;
+mod mw;
 mod wb;
 
 #[tokio::main]
@@ -31,9 +35,14 @@ async fn run() -> Result<()> {
 
     let listener = TcpListener::bind(&config.agent.bind).await?;
 
-    // todo: API_TOKEN auth between server and agent
+    // public API, no auth
     let app = axum::Router::new()
         .route("/health", get(|| async { "OK" }))
+        .layer(TraceLayer::new_for_http());
+
+    // protected API, require API_TOKEN
+    // todo: API_TOKEN auth between server and agent
+    let _app = axum::Router::new()
         .route("/config", get(api::get_config))
         .route("/cmd", post(cmd_handler))
         // TODO, more CMDs, like traceroute, wg show, etc.
@@ -42,6 +51,10 @@ async fn run() -> Result<()> {
         .route("/modify_peer", post(wb::modify_config))
         .route("/delete_peer", delete(wb::delete_config))
         .layer(TraceLayer::new_for_http())
+        .route_layer(middleware::from_fn_with_state(
+            config.clone(),
+            auth_middleware,
+        ))
         .with_state(config);
 
     info!(
@@ -49,7 +62,7 @@ async fn run() -> Result<()> {
         listener.local_addr().unwrap()
     );
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.merge(_app)).await?;
 
     Ok(())
 }

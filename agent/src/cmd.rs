@@ -4,8 +4,7 @@ use axum::{Json, http::StatusCode};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone)]
-// TODO: is it correct?
-// #[serde(tag = "op", content = "args")]
+#[serde(tag = "op", content = "args")]
 #[serde(rename_all = "lowercase")]
 pub enum Cmd {
     /// Ping CMD, target:
