@@ -1,5 +1,5 @@
 [workspace]
-members = [ "agent", "server", "webui"]
+members = [ "agent", "server" ]
 default-members = [ "server" ]
 resolver = "2"
 

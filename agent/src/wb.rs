@@ -64,8 +64,8 @@ pub async fn create_config(
     write_wg(&cfg, asn, &wg_conf)?;
     write_bird(&cfg, asn, &bird_conf)?;
 
-    run_wg_up(asn);
-    run_birdc_configure();
+    // run_wg_up(asn);
+    // run_birdc_configure();
 
     Ok(StatusCode::OK)
 }
@@ -83,9 +83,9 @@ pub async fn modify_config(
     write_wg(&cfg, asn, &wg_conf)?;
     write_bird(&cfg, asn, &bird_conf)?;
 
-    run_wg_down(asn);
-    run_wg_up(asn);
-    run_birdc_configure();
+    // run_wg_down(asn);
+    // run_wg_up(asn);
+    // run_birdc_configure();
 
     Ok(StatusCode::OK)
 }
@@ -96,10 +96,10 @@ pub async fn delete_config(
 ) -> Result<StatusCode, StatusCode> {
     let asn = parse_asn_header(&headers)?;
 
-    run_wg_down(asn);
+    // run_wg_down(asn);
     remove_wg(&cfg, asn);
     remove_bird(&cfg, asn);
-    run_birdc_configure();
+    // run_birdc_configure();
 
     Ok(StatusCode::OK)
 }

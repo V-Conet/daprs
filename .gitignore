@@ -6,3 +6,5 @@
 /serv-conf.toml
 /agent-conf.toml
 /.claude
+/wg
+/bird
