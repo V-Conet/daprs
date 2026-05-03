@@ -16,11 +16,14 @@ use serde_json::Value;
 
 use crate::config::{AppState, WebConfig};
 
-const OAUTH_LOGIN_STATE_TREE: &str = "oauth_login_state";
-const OAUTH_SESSION_TREE: &str = "oauth_sessions";
+const LOGIN_STATE_TREE: &str = "oauth_login_state";
+const SESSION_TREE: &str = "oauth_sessions";
 const LOGIN_STATE_TTL_SECS: u64 = 600;
 const SESSION_TTL_SECS: u64 = 8 * 60 * 60;
-const SESSION_COOKIE_NAME: &str = "daprs_session";
+const SESSION_COOKIE: &str = "daprs_session";
+
+type OAuthClient =
+    BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
 
 pub async fn login(State(state): State<AppState>) -> Result<Redirect, StatusCode> {
     let web = state
@@ -28,14 +31,13 @@ pub async fn login(State(state): State<AppState>) -> Result<Redirect, StatusCode
         .web
         .as_ref()
         .ok_or(StatusCode::NOT_IMPLEMENTED)?;
-    let oauth = create_oauth_client(web).await?;
+    let (client, _discovery) = create_oauth_client(web).await?;
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     let csrf = CsrfToken::new_random();
     let csrf_secret = csrf.secret().to_string();
 
-    let (authorization_url, _) = oauth
-        .client
+    let (authorization_url, _) = client
         .authorize_url(|| csrf)
         .set_pkce_challenge(pkce_challenge)
         .url();
@@ -45,12 +47,7 @@ pub async fn login(State(state): State<AppState>) -> Result<Redirect, StatusCode
         created_at: now_unix_secs(),
     };
 
-    persist_json(
-        &state.db,
-        OAUTH_LOGIN_STATE_TREE,
-        &csrf_secret,
-        &login_state,
-    )?;
+    persist_json(&state.db, LOGIN_STATE_TREE, &csrf_secret, &login_state)?;
 
     Ok(Redirect::to(authorization_url.as_str()))
 }
@@ -64,7 +61,7 @@ pub async fn login_callback(
         .web
         .as_ref()
         .ok_or(StatusCode::NOT_IMPLEMENTED)?;
-    let oauth = create_oauth_client(web).await?;
+    let (client, discovery) = create_oauth_client(web).await?;
 
     if query.error.is_some() {
         return Err(StatusCode::UNAUTHORIZED);
@@ -74,25 +71,19 @@ pub async fn login_callback(
     let state_value = query.state.ok_or(StatusCode::BAD_REQUEST)?;
     let login_state = consume_login_state(&state, &state_value)?;
 
-    let http_client = reqwest::Client::builder()
+    let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let token = oauth
-        .client
+    let token = client
         .exchange_code(AuthorizationCode::new(code))
         .set_pkce_verifier(PkceCodeVerifier::new(login_state.pkce_verifier))
-        .request_async(&http_client)
+        .request_async(&http)
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
 
-    let userinfo = fetch_userinfo(
-        &http_client,
-        &oauth.discovery,
-        token.access_token().secret(),
-    )
-    .await?;
+    let userinfo = fetch_userinfo(&http, &discovery, token.access_token().secret()).await?;
 
     let session_id = CsrfToken::new_random().secret().to_string();
     let now = now_unix_secs();
@@ -102,13 +93,12 @@ pub async fn login_callback(
         expires_at: now + SESSION_TTL_SECS,
     };
 
-    persist_json(&state.db, OAUTH_SESSION_TREE, &session_id, &session)?;
+    persist_json(&state.db, SESSION_TREE, &session_id, &session)?;
 
     let mut response = Redirect::to("/").into_response();
-    let set_cookie = build_session_cookie(&session_id, web)?;
     response
         .headers_mut()
-        .append(header::SET_COOKIE, set_cookie);
+        .append(header::SET_COOKIE, build_session_cookie(&session_id, web)?);
     Ok(response)
 }
 
@@ -128,10 +118,10 @@ pub async fn logout(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    if let Some(session_id) = extract_cookie(&headers, SESSION_COOKIE_NAME) {
+    if let Some(session_id) = extract_cookie(&headers, SESSION_COOKIE) {
         let tree = state
             .db
-            .open_tree(OAUTH_SESSION_TREE)
+            .open_tree(SESSION_TREE)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         tree.remove(session_id.as_bytes())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -160,82 +150,20 @@ pub async fn require_auth_middleware(
     Ok(next.run(request).await)
 }
 
-async fn create_oauth_client(web: &WebConfig) -> Result<OAuthRuntime, StatusCode> {
-    validate_required_web_config(web)?;
-
-    let discovery_url = normalize_discovery_url(&web.oauth_provider);
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let discovery = client
-        .get(&discovery_url)
-        .send()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?
-        .error_for_status()
-        .map_err(|_| StatusCode::BAD_GATEWAY)?
-        .json::<OidcDiscoveryDocument>()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
-
-    validate_https_endpoint(&discovery.authorization_endpoint)?;
-    validate_https_endpoint(&discovery.token_endpoint)?;
-    if let Some(userinfo_endpoint) = &discovery.userinfo_endpoint {
-        validate_https_endpoint(userinfo_endpoint)?;
-    }
-
-    let oauth_client = BasicClient::new(ClientId::new(web.client_id.clone()))
-        .set_client_secret(ClientSecret::new(web.client_secret.clone()))
-        .set_auth_uri(
-            AuthUrl::new(discovery.authorization_endpoint.clone())
-                .map_err(|_| StatusCode::BAD_REQUEST)?,
-        )
-        .set_token_uri(
-            TokenUrl::new(discovery.token_endpoint.clone()).map_err(|_| StatusCode::BAD_REQUEST)?,
-        )
-        .set_redirect_uri(
-            RedirectUrl::new(web.redirect_uri.clone()).map_err(|_| StatusCode::BAD_REQUEST)?,
-        );
-
-    Ok(OAuthRuntime {
-        client: oauth_client,
-        discovery,
-    })
+// --- helpers ---
+/// Returns ASN from session
+pub(crate) fn get_session_asn(session: &OAuthSession) -> Option<u32> {
+    session.userinfo.get("sub")?.as_str()?.parse().ok()
 }
 
-async fn fetch_userinfo(
-    http_client: &reqwest::Client,
-    discovery: &OidcDiscoveryDocument,
-    access_token: &str,
-) -> Result<Value, StatusCode> {
-    let endpoint = discovery
-        .userinfo_endpoint
-        .as_ref()
-        .ok_or(StatusCode::BAD_GATEWAY)?;
-
-    let response = http_client
-        .get(endpoint)
-        .bearer_auth(access_token)
-        .send()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?
-        .error_for_status()
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
-
-    response
-        .json::<Value>()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)
-}
-
-fn require_session(state: &AppState, headers: &HeaderMap) -> Result<OAuthSession, StatusCode> {
-    let session_id =
-        extract_cookie(headers, SESSION_COOKIE_NAME).ok_or(StatusCode::UNAUTHORIZED)?;
+pub(crate) fn require_session(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<OAuthSession, StatusCode> {
+    let session_id = extract_cookie(headers, SESSION_COOKIE).ok_or(StatusCode::UNAUTHORIZED)?;
     let tree = state
         .db
-        .open_tree(OAUTH_SESSION_TREE)
+        .open_tree(SESSION_TREE)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let value = tree
@@ -256,10 +184,111 @@ fn require_session(state: &AppState, headers: &HeaderMap) -> Result<OAuthSession
     Ok(session)
 }
 
+pub(crate) fn persist_json<T: Serialize>(
+    db: &sled::Db,
+    tree_name: &str,
+    key: &str,
+    value: &T,
+) -> Result<(), StatusCode> {
+    let tree = db
+        .open_tree(tree_name)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let encoded = serde_json::to_vec(value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    tree.insert(key.as_bytes(), encoded)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tree.flush()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(())
+}
+
+// --- private ---
+
+async fn create_oauth_client(web: &WebConfig) -> Result<(OAuthClient, OidcDiscovery), StatusCode> {
+    if web.client_id.trim().is_empty()
+        || web.client_secret.trim().is_empty()
+        || web.oauth_provider.trim().is_empty()
+        || web.redirect_uri.trim().is_empty()
+        || !web.oauth_provider.starts_with("https://")
+        || !(web.redirect_uri.starts_with("https://")
+            || web.redirect_uri.starts_with("http://127.0.0.1")
+            || web.redirect_uri.starts_with("http://localhost"))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let discovery_url = web.oauth_provider.trim_end_matches('/');
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let discovery: OidcDiscovery = http
+        .get(discovery_url)
+        .send()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?
+        .error_for_status()
+        .map_err(|_| StatusCode::BAD_GATEWAY)?
+        .json()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    if !discovery.authorization_endpoint.starts_with("https://")
+        || !discovery.token_endpoint.starts_with("https://")
+        || discovery
+            .userinfo_endpoint
+            .as_ref()
+            .is_some_and(|u| !u.starts_with("https://"))
+    {
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+
+    let client = BasicClient::new(ClientId::new(web.client_id.clone()))
+        .set_client_secret(ClientSecret::new(web.client_secret.clone()))
+        .set_auth_uri(
+            AuthUrl::new(discovery.authorization_endpoint.clone())
+                .map_err(|_| StatusCode::BAD_REQUEST)?,
+        )
+        .set_token_uri(
+            TokenUrl::new(discovery.token_endpoint.clone()).map_err(|_| StatusCode::BAD_REQUEST)?,
+        )
+        .set_redirect_uri(
+            RedirectUrl::new(web.redirect_uri.clone()).map_err(|_| StatusCode::BAD_REQUEST)?,
+        );
+
+    Ok((client, discovery))
+}
+
+async fn fetch_userinfo(
+    http: &reqwest::Client,
+    discovery: &OidcDiscovery,
+    access_token: &str,
+) -> Result<Value, StatusCode> {
+    let endpoint = discovery
+        .userinfo_endpoint
+        .as_ref()
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+
+    let response = http
+        .get(endpoint)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?
+        .error_for_status()
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    response
+        .json::<Value>()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)
+}
+
 fn consume_login_state(state: &AppState, csrf_state: &str) -> Result<OAuthLoginState, StatusCode> {
     let tree = state
         .db
-        .open_tree(OAUTH_LOGIN_STATE_TREE)
+        .open_tree(LOGIN_STATE_TREE)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let value = tree
@@ -278,29 +307,10 @@ fn consume_login_state(state: &AppState, csrf_state: &str) -> Result<OAuthLoginS
     Ok(login_state)
 }
 
-fn persist_json<T: Serialize>(
-    db: &sled::Db,
-    tree_name: &str,
-    key: &str,
-    value: &T,
-) -> Result<(), StatusCode> {
-    let tree = db
-        .open_tree(tree_name)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let encoded = serde_json::to_vec(value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    tree.insert(key.as_bytes(), encoded)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    tree.flush()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(())
-}
-
 fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
     for segment in cookies.split(';') {
-        let trimmed = segment.trim();
-        let (k, v) = trimmed.split_once('=')?;
+        let (k, v) = segment.trim().split_once('=')?;
         if k == name {
             return Some(v.to_string());
         }
@@ -309,77 +319,35 @@ fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 fn build_session_cookie(session_id: &str, web: &WebConfig) -> Result<HeaderValue, StatusCode> {
-    let secure = is_https_url(&web.redirect_uri)
+    let secure = web.redirect_uri.starts_with("https://")
         || web
             .frontend_origin
             .as_ref()
-            .is_some_and(|origin| is_https_url(origin));
-    let same_site_attr = if web.frontend_origin.is_some() && secure {
+            .is_some_and(|o| o.starts_with("https://"));
+    let same_site = if web.frontend_origin.is_some() && secure {
         "; SameSite=None"
     } else {
         "; SameSite=Lax"
     };
     let secure_attr = if secure { "; Secure" } else { "" };
     let cookie = format!(
-        "{}={}; Path=/; Max-Age={}; HttpOnly{}{}{}",
-        SESSION_COOKIE_NAME, session_id, SESSION_TTL_SECS, same_site_attr, secure_attr, ""
+        "{}={}; Path=/; Max-Age={}; HttpOnly{}{}",
+        SESSION_COOKIE, session_id, SESSION_TTL_SECS, same_site, secure_attr,
     );
     HeaderValue::from_str(&cookie).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-}
-
-fn validate_required_web_config(web: &WebConfig) -> Result<(), StatusCode> {
-    if web.client_id.trim().is_empty()
-        || web.client_secret.trim().is_empty()
-        || web.oauth_provider.trim().is_empty()
-        || web.redirect_uri.trim().is_empty()
-    {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    if !is_https_url(&web.oauth_provider) {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    if !(is_https_url(&web.redirect_uri) || is_loopback_http_url(&web.redirect_uri)) {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    Ok(())
-}
-
-fn normalize_discovery_url(provider: &str) -> String {
-    provider.trim_end_matches('/').to_string()
-}
-
-fn validate_https_endpoint(url: &str) -> Result<(), StatusCode> {
-    if is_https_url(url) {
-        return Ok(());
-    }
-    Err(StatusCode::BAD_GATEWAY)
-}
-
-fn is_https_url(url: &str) -> bool {
-    url.starts_with("https://")
-}
-
-fn is_loopback_http_url(url: &str) -> bool {
-    url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost")
 }
 
 fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
+        .unwrap()
         .as_secs()
 }
 
-struct OAuthRuntime {
-    client: BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>,
-    discovery: OidcDiscoveryDocument,
-}
+// --- types ---
 
 #[derive(Deserialize, Clone)]
-struct OidcDiscoveryDocument {
+struct OidcDiscovery {
     authorization_endpoint: String,
     token_endpoint: String,
     userinfo_endpoint: Option<String>,
@@ -399,15 +367,15 @@ struct OAuthLoginState {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-struct OAuthSession {
-    userinfo: Value,
-    issued_at: u64,
-    expires_at: u64,
+pub struct OAuthSession {
+    pub userinfo: Value,
+    pub issued_at: u64,
+    pub expires_at: u64,
 }
 
 #[derive(Serialize)]
 pub struct MeResponse {
-    issued_at: u64,
-    expires_at: u64,
-    userinfo: Value,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub userinfo: Value,
 }

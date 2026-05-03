@@ -17,36 +17,45 @@ pub enum RoutingPolicy {
     Downstream,
 }
 
-/// 前端发送的peering请求
-/// TODO: 其他参数和判断
+
 #[derive(Deserialize, Serialize)]
 pub struct PeeringPayload {
-    ///  是否启用 Multi-Hop
+    /// MultiHop
     pub is_mhp: bool,
-    /// 是否启用 NextHop
+    /// Extended NextHop
     pub is_nhp: bool,
     /// 路由策略
     pub policy: RoutingPolicy,
+    /// 本节点 DN42 IPv4
+    pub v4: Option<String>,
+    /// 本节点 DN42 IPv6
+    pub v6: Option<String>,
+    /// 本节点链路本地地址
+    pub lla: Option<String>,
+    /// 是否优先使用链路本地地址
+    pub is_prefer_lla: bool,
+    /// 对端地址
+    pub endpoint: String,
+    /// 对端公钥
+    pub pubkey: String,
+    /// 开放给对端的端口
+    pub custom_port: Option<u16>,
+    /// 预共享密钥
+    pub psk: Option<String>,
+    /// MTU
+    pub mtu: Option<u16>,
 }
 
 #[derive(Deserialize, Serialize)]
 pub struct NodeActionRequest<T> {
+    /// 目标节点名称
     pub node: String,
+    /// Payload from frontend
     pub payload: T,
 }
 
-#[derive(Serialize, Deserialize)]
-/// 交给agent处理的peering请求
-pub struct PeeringRequest {
-    /// 格式化后的peering请求字符串，包含完整 wireguard/bird peer 配置
-    pub wgconfig: String,
-    pub birdconfig: String,
-}
-
-// TODO: 这个东西并不是最后的设计，有待商榷
 #[derive(Deserialize, Serialize)]
-pub struct PeerInfo {
-    pub asn: u32,
+pub struct RemoveRequest {
     pub node: String,
 }
 
@@ -64,14 +73,21 @@ pub struct FrontendAgentConfig {
     pub is_open: bool,
     pub is_verify: bool,
     pub extra_msg: String,
+    #[serde(default)]
     pub net: NetConfig,
+    #[serde(default)]
     pub dn42: Dn42Config,
 }
 
-// for create/modify peer, return the full wg/bird config
-// this method is under consideration, may be changed if we find a better way to handle peering config
-#[derive(Serialize, Deserialize)]
-pub struct WbConfig {
-    pub wg_config: String,
-    pub bird_config: String,
+impl Default for FrontendAgentConfig {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            is_open: false,
+            is_verify: false,
+            extra_msg: "agent unavailable".into(),
+            net: NetConfig::default(),
+            dn42: Dn42Config::default(),
+        }
+    }
 }

@@ -5,3 +5,4 @@
 /*.db
 /serv-conf.toml
 /agent-conf.toml
+/.claude
