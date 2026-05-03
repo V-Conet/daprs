@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 
-import { createPeering, fetchNodes, modifyPeering, removePeering } from '../lib/api'
-import { stageLinks, unauthorized } from '../lib/page'
+import { createPeering, fetchMe, fetchNodes, modifyPeering, removePeering } from '../lib/api'
+import { stageLinks, unauthorized, useThemeToggle } from '../lib/page'
 import type { NodeActionRequest, NodeAgentConfig, PeeringPayload, RoutingPolicy } from '../types'
 
 const policies: RoutingPolicy[] = ['FullTable', 'Transit', 'PeeringOnly', 'Downstream']
@@ -10,6 +10,7 @@ const nodes = ref<Record<string, NodeAgentConfig>>({})
 const busy = ref(false)
 const error = ref('')
 const message = ref('')
+const { themeLabel, toggleTheme } = useThemeToggle()
 
 const form = reactive<NodeActionRequest<PeeringPayload>>({
   node: '',
@@ -30,6 +31,15 @@ const form = reactive<NodeActionRequest<PeeringPayload>>({
 })
 
 onMounted(async () => {
+  try {
+    await fetchMe()
+  } catch (err) {
+    const text = err instanceof Error ? err.message : '请求失败'
+    if (unauthorized(text)) {
+      window.location.href = '/signin.html'
+      return
+    }
+  }
   await refreshNodes()
 })
 
@@ -141,8 +151,26 @@ async function submit(action: 'create' | 'modify' | 'remove') {
 
 <template>
   <div class="shell">
+    <header class="site-header card">
+      <div class="site-header-inner">
+        <a class="logo" href="/signin.html">dn42</a>
+        <div class="header-right">
+          <button class="button button-ghost" type="button" @click="toggleTheme">{{ themeLabel }}</button>
+        </div>
+      </div>
+    </header>
+
     <nav class="tabs card">
       <a v-for="item in stageLinks" :key="item.key" :href="item.href" class="tab" :class="{ active: item.key === 'compose' }">{{ item.label }}</a>
+    </nav>
+
+    <nav class="flow-nav card">
+      <ol>
+        <li class="active">1. 查询</li>
+        <li class="active">2. 选择</li>
+        <li class="active">3. 挑战</li>
+        <li class="active">4. 欢迎</li>
+      </ol>
     </nav>
 
     <section class="card pane">
@@ -235,5 +263,7 @@ async function submit(action: 'create' | 'modify' | 'remove') {
         <button class="button button-danger" type="button" :disabled="busy" @click="submit('remove')">删除</button>
       </div>
     </section>
+
+    <footer class="site-footer">Powered by PeerAPI</footer>
   </div>
 </template>

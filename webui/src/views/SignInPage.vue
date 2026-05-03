@@ -2,10 +2,11 @@
 import { onMounted, ref } from 'vue'
 
 import { fetchMe, loginUrl } from '../lib/api'
-import { stageLinks, unauthorized } from '../lib/page'
+import { unauthorized, useThemeToggle } from '../lib/page'
 
 const error = ref('')
 const loggedIn = ref(false)
+const { themeLabel, toggleTheme } = useThemeToggle()
 
 onMounted(async () => {
   try {
@@ -21,10 +22,15 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="shell">
-    <nav class="tabs card">
-      <a v-for="item in stageLinks" :key="item.key" :href="item.href" class="tab" :class="{ active: item.key === 'signin' }">{{ item.label }}</a>
-    </nav>
+  <div class="shell signin-shell">
+    <header class="site-header card">
+      <div class="site-header-inner">
+        <a class="logo" href="/signin.html">dn42</a>
+        <div class="header-right">
+          <button class="button button-ghost" type="button" @click="toggleTheme">{{ themeLabel }}</button>
+        </div>
+      </div>
+    </header>
 
     <section class="hero card">
       <div class="hero-copy">
@@ -54,5 +60,7 @@ onMounted(async () => {
         </div>
       </div>
     </section>
+
+    <footer class="site-footer">Powered by PeerAPI</footer>
   </div>
 </template>

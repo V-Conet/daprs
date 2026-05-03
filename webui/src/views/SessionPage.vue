@@ -3,15 +3,25 @@ import { onMounted, ref } from 'vue'
 
 import { fetchMe, fetchNodes, fetchPeers, logout } from '../lib/api'
 import type { MeResponse } from '../types'
-import { stageLinks, unauthorized } from '../lib/page'
+import { stageLinks, unauthorized, useThemeToggle } from '../lib/page'
 
 const me = ref<MeResponse | null>(null)
 const nodeCount = ref(0)
 const peerCount = ref(0)
 const error = ref('')
 const message = ref('')
+const { themeLabel, toggleTheme } = useThemeToggle()
 
 onMounted(async () => {
+  try {
+    await fetchMe()
+  } catch (err) {
+    const text = err instanceof Error ? err.message : '请求失败'
+    if (unauthorized(text)) {
+      window.location.href = '/signin.html'
+      return
+    }
+  }
   await refresh()
 })
 
@@ -49,6 +59,15 @@ function formatTime(value: number) {
 
 <template>
   <div class="shell">
+    <header class="site-header card">
+      <div class="site-header-inner">
+        <a class="logo" href="/signin.html">dn42</a>
+        <div class="header-right">
+          <button class="button button-ghost" type="button" @click="toggleTheme">{{ themeLabel }}</button>
+        </div>
+      </div>
+    </header>
+
     <nav class="tabs card">
       <a v-for="item in stageLinks" :key="item.key" :href="item.href" class="tab" :class="{ active: item.key === 'session' }">{{ item.label }}</a>
     </nav>
@@ -104,5 +123,7 @@ function formatTime(value: number) {
         </div>
       </div>
     </section>
+
+    <footer class="site-footer">Powered by PeerAPI</footer>
   </div>
 </template>
