@@ -1,13 +1,11 @@
-use std::{
-    collections::BTreeMap,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::collections::BTreeMap;
 
 use crate::{
     api::oauth::{get_session_asn, persist_json, require_session},
     api::*,
     config::AppState,
 };
+use axum::extract::Path;
 use axum::http::HeaderMap;
 use axum::{Json, extract::State, http::StatusCode};
 
@@ -42,12 +40,11 @@ pub async fn post_peering(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(action): Json<NodeActionRequest<PeeringPayload>>,
-) -> Result<Json<bool>, StatusCode> {
+) -> Result<StatusCode, StatusCode> {
     let session = require_session(&state, &headers)?;
     let asn = get_session_asn(&session).ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let key = now_nanos_key();
-    persist_json(&state.db, PEERING_QUEUE, &key, &action)?;
+    persist_json(&state.db, PEERING_QUEUE, &action.node, &action)?;
 
     dispatch_to_agent(
         &state,
@@ -59,19 +56,18 @@ pub async fn post_peering(
     )
     .await?;
 
-    Ok(Json(true))
+    Ok(StatusCode::CREATED)
 }
 
 pub async fn post_modify(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(action): Json<NodeActionRequest<PeeringPayload>>,
-) -> Result<Json<bool>, StatusCode> {
+) -> Result<StatusCode, StatusCode> {
     let session = require_session(&state, &headers)?;
     let asn = get_session_asn(&session).ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let key = now_nanos_key();
-    persist_json(&state.db, MODIFY_QUEUE, &key, &action)?;
+    persist_json(&state.db, MODIFY_QUEUE, &action.node, &action)?;
 
     dispatch_to_agent(
         &state,
@@ -83,19 +79,18 @@ pub async fn post_modify(
     )
     .await?;
 
-    Ok(Json(true))
+    Ok(StatusCode::OK)
 }
 
 pub async fn post_remove(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<RemoveRequest>,
-) -> Result<Json<bool>, StatusCode> {
+) -> Result<StatusCode, StatusCode> {
     let session = require_session(&state, &headers)?;
     let asn = get_session_asn(&session).ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let key = now_nanos_key();
-    persist_json(&state.db, REMOVE_QUEUE, &key, &req)?;
+    persist_json(&state.db, REMOVE_QUEUE, &req.node, &req)?;
 
     dispatch_to_agent(
         &state,
@@ -107,29 +102,47 @@ pub async fn post_remove(
     )
     .await?;
 
-    Ok(Json(true))
+    remove_from_queue(&state.db, PEERING_QUEUE, &req.node)?;
+    remove_from_queue(&state.db, MODIFY_QUEUE, &req.node)?;
+
+    Ok(StatusCode::OK)
 }
 
 pub async fn get_peers(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<NodeActionRequest<PeeringPayload>>>, StatusCode> {
-    let tree = state
-        .db
-        .open_tree(PEERING_QUEUE)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let peers = tree
-        .iter()
-        .map(|item| {
-            item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-                .and_then(|(_, value)| {
-                    serde_json::from_slice::<NodeActionRequest<PeeringPayload>>(&value)
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
+    let peers = read_all_from_queue(&state.db, PEERING_QUEUE)?;
     Ok(Json(peers))
+}
+
+pub async fn delete_peering_queue(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(node): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    require_session(&state, &headers)?;
+    remove_from_queue(&state.db, PEERING_QUEUE, &node)?;
+    Ok(StatusCode::OK)
+}
+
+pub async fn delete_modify_queue(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(node): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    require_session(&state, &headers)?;
+    remove_from_queue(&state.db, MODIFY_QUEUE, &node)?;
+    Ok(StatusCode::OK)
+}
+
+pub async fn delete_remove_queue(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(node): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    require_session(&state, &headers)?;
+    remove_from_queue(&state.db, REMOVE_QUEUE, &node)?;
+    Ok(StatusCode::OK)
 }
 
 // --- private ---
@@ -211,10 +224,32 @@ fn normalize_agent_base_url(addr: &str) -> String {
     }
 }
 
-fn now_nanos_key() -> String {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()
-        .to_string()
+fn remove_from_queue(db: &sled::Db, tree_name: &str, node: &str) -> Result<(), StatusCode> {
+    let tree = db
+        .open_tree(tree_name)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tree.remove(node.as_bytes())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tree.flush()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(())
+}
+
+fn read_all_from_queue<T: serde::de::DeserializeOwned>(
+    db: &sled::Db,
+    tree_name: &str,
+) -> Result<Vec<T>, StatusCode> {
+    let tree = db
+        .open_tree(tree_name)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    tree.iter()
+        .map(|item| {
+            item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                .and_then(|(_, value)| {
+                    serde_json::from_slice::<T>(&value)
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()
 }

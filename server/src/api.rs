@@ -17,7 +17,6 @@ pub enum RoutingPolicy {
     Downstream,
 }
 
-
 #[derive(Deserialize, Serialize)]
 pub struct PeeringPayload {
     /// MultiHop

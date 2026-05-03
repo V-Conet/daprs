@@ -111,7 +111,7 @@ fn build_wg_config(asn: u32, peer: &PeerRequest, cfg: &Config) -> String {
     let my_lla = peer.lla.as_deref().unwrap_or(&cfg.agent.dn42.lla);
     let my_ula = &cfg.agent.dn42.ipv6;
     let my_v4 = &cfg.agent.dn42.ipv4;
-    
+
     // default: last five digits of ASN if it's 424242XXXX, for Clearnet ASNs, using 40000 + last 4 digits
     let port = peer.custom_port.unwrap_or({
         if asn >= 4242420000 {

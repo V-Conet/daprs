@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use axum::middleware;
 use axum::response::Html;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use clap::Parser;
 use tokio::net::TcpListener;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -44,7 +44,7 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let cli = cli::Cli::parse();
-    
+
     let config = load_config(&cli.config)?;
     let db = sled::open("daprs-server.db")?;
     let state = AppState { config, db };
@@ -57,8 +57,11 @@ async fn run() -> Result<()> {
         .route("/api/nodes", get(handler::get_nodes))
         .route("/api/peers", get(handler::get_peers))
         .route("/api/peering", post(handler::post_peering))
+        .route("/api/peering/{node}", delete(handler::delete_peering_queue))
         .route("/api/modify", post(handler::post_modify))
+        .route("/api/modify/{node}", delete(handler::delete_modify_queue))
         .route("/api/remove", post(handler::post_remove))
+        .route("/api/remove/{node}", delete(handler::delete_remove_queue))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             oauth::require_auth_middleware,
@@ -85,6 +88,7 @@ async fn run() -> Result<()> {
                 .allow_methods([
                     axum::http::Method::GET,
                     axum::http::Method::POST,
+                    axum::http::Method::DELETE,
                     axum::http::Method::OPTIONS,
                 ])
                 .allow_headers([
