@@ -92,7 +92,8 @@ pub async fn post_remove(
 
     persist_json(&state.db, REMOVE_QUEUE, &req.node, &req)?;
 
-    dispatch_to_agent(
+    // Attempt dispatch; if agent is unreachable or file missing, still clean up queues.
+    let dispatch_result = dispatch_to_agent(
         &state,
         &req.node,
         reqwest::Method::DELETE,
@@ -100,10 +101,13 @@ pub async fn post_remove(
         None,
         asn,
     )
-    .await?;
+    .await;
 
-    remove_from_queue(&state.db, PEERING_QUEUE, &req.node)?;
-    remove_from_queue(&state.db, MODIFY_QUEUE, &req.node)?;
+    // Always clean up related queues — best effort, ignore individual errors.
+    let _ = remove_from_queue(&state.db, PEERING_QUEUE, &req.node);
+    let _ = remove_from_queue(&state.db, MODIFY_QUEUE, &req.node);
+
+    dispatch_result?;
 
     Ok(StatusCode::OK)
 }
@@ -143,6 +147,75 @@ pub async fn delete_remove_queue(
     require_session(&state, &headers)?;
     remove_from_queue(&state.db, REMOVE_QUEUE, &node)?;
     Ok(StatusCode::OK)
+}
+
+/// Proxy CMD execution from webui to the target agent.
+/// The payload is forwarded verbatim — the server does not inspect or validate commands.
+pub async fn post_cmd(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(action): Json<NodeActionRequest<serde_json::Value>>,
+) -> Result<String, StatusCode> {
+    require_session(&state, &headers)?;
+
+    let server = state
+        .config
+        .server
+        .servers
+        .iter()
+        .find(|s| s.name == action.node)
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    let url = normalize_agent_base_url(&server.address) + "/cmd";
+
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .header("x-api-token", &state.config.server.api_token)
+        .json(&action.payload)
+        .send()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    if !resp.status().is_success() {
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+
+    resp.text().await.map_err(|_| StatusCode::BAD_GATEWAY)
+}
+
+/// Query an agent's existing peer configuration (WG + Bird files + live status).
+pub async fn get_peer_info(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(node): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let session = require_session(&state, &headers)?;
+    let asn = get_session_asn(&session).ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let server = state
+        .config
+        .server
+        .servers
+        .iter()
+        .find(|s| s.name == node)
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    let url = normalize_agent_base_url(&server.address) + "/peer_info";
+
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("x-api-token", &state.config.server.api_token)
+        .header("asn", asn.to_string())
+        .send()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    if !resp.status().is_success() {
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+
+    let json: serde_json::Value = resp.json().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    Ok(Json(json))
 }
 
 // --- private ---

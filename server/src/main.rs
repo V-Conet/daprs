@@ -62,6 +62,8 @@ async fn run() -> Result<()> {
         .route("/api/modify/{node}", delete(handler::delete_modify_queue))
         .route("/api/remove", post(handler::post_remove))
         .route("/api/remove/{node}", delete(handler::delete_remove_queue))
+        .route("/api/cmd", post(handler::post_cmd))
+        .route("/api/peer/{node}/info", get(handler::get_peer_info))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             oauth::require_auth_middleware,

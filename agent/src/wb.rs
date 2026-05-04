@@ -1,13 +1,14 @@
 // Write Wireguard & Bird configuration files
 
-use std::process::Command;
+use std::{fmt::Debug, process::Command};
 
 use axum::{
     Json,
     extract::State,
     http::{HeaderMap, StatusCode},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use toml::value::Time;
 
 use crate::config::Config;
 
@@ -39,7 +40,7 @@ pub struct PeerRequest {
     pub mtu: Option<u16>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub enum RoutingPolicy {
     /// 接收所有有效路由，导出所有有效路由。
     FullTable,
@@ -50,6 +51,8 @@ pub enum RoutingPolicy {
     /// 只接收 AS_PATH = 1 的路由，导出所有有效路由。
     Downstream,
 }
+
+// --- handlers ---
 
 pub async fn create_config(
     headers: HeaderMap,
@@ -63,9 +66,6 @@ pub async fn create_config(
 
     write_wg(&cfg, asn, &wg_conf)?;
     write_bird(&cfg, asn, &bird_conf)?;
-
-    // run_wg_up(asn);
-    // run_birdc_configure();
 
     Ok(StatusCode::OK)
 }
@@ -83,10 +83,6 @@ pub async fn modify_config(
     write_wg(&cfg, asn, &wg_conf)?;
     write_bird(&cfg, asn, &bird_conf)?;
 
-    // run_wg_down(asn);
-    // run_wg_up(asn);
-    // run_birdc_configure();
-
     Ok(StatusCode::OK)
 }
 
@@ -96,12 +92,303 @@ pub async fn delete_config(
 ) -> Result<StatusCode, StatusCode> {
     let asn = parse_asn_header(&headers)?;
 
-    // run_wg_down(asn);
+    // Check file existence before running CMDs
+    let wg_path = format!("{}/dn42-{}.conf", cfg.agent.wg_path, asn);
+    let bird_path = format!("{}/dn42_peers/{}.conf", cfg.agent.bird_path, asn);
+
+    let wg_existed = std::path::Path::new(&wg_path).exists();
+    let bird_existed = std::path::Path::new(&bird_path).exists();
+
+    if wg_existed {
+        run_wg_down(asn);
+    }
     remove_wg(&cfg, asn);
     remove_bird(&cfg, asn);
-    // run_birdc_configure();
+
+    if wg_existed || bird_existed {
+        run_birdc_configure();
+    }
 
     Ok(StatusCode::OK)
+}
+/// 查询 Peer 配置和状态信息，包括 wg/bird 配置和运行状态
+pub async fn get_peer_info(
+    headers: HeaderMap,
+    State(cfg): State<Config>,
+) -> Result<Json<PeerInfoResponse>, StatusCode> {
+    let asn = parse_asn_header(&headers)?;
+
+    // TODO: carefully handle file reading
+    let wg_path = format!("{}/dn42-{}.conf", cfg.agent.wg_path, asn);
+    let bird_path = format!("{}/dn42_peers/{}.conf", cfg.agent.bird_path, asn);
+
+    let wg_info = parse_wg_config(&wg_path);
+    let bird_info = parse_bird_config(&bird_path);
+
+    let wg_status = run_cmd("wg", &["show", &format!("dn42-{asn}")]);
+    let bird_status = run_bird_status(asn, &bird_info.sessions);
+
+    Ok(Json(PeerInfoResponse {
+        asn,
+        port: wg_info.port,
+        v4: wg_info.v4_peer,
+        v6: wg_info.v6_peer,
+        lla: wg_info.lla_peer,
+        endpoint: wg_info.endpoint,
+        pubkey: wg_info.pubkey,
+        psk: wg_info.psk,
+        mtu: wg_info.mtu,
+        policy: bird_info.policy,
+        is_mhp: bird_info.is_mhp,
+        is_nhp: bird_info.is_nhp,
+        is_prefer_lla: bird_info.is_prefer_lla,
+        session_type: bird_info.session_type,
+        wg_status: if wg_status.is_empty() {
+            None
+        } else {
+            Some(wg_status)
+        },
+        bird_status: if bird_status.is_empty() {
+            None
+        } else {
+            Some(bird_status)
+        },
+        my_v4: cfg.agent.dn42.ipv4.clone(),
+        my_v6: cfg.agent.dn42.ipv6.clone(),
+        my_lla: cfg.agent.dn42.lla.clone(),
+        my_pubkey: cfg.agent.dn42.wgkey.clone(),
+    }))
+}
+
+// --- response types ---
+
+#[derive(Serialize)]
+pub struct PeerInfoResponse {
+    pub asn: u32,
+    pub port: u16,
+    pub v4: Option<String>,
+    pub v6: Option<String>,
+    pub lla: Option<String>,
+    pub endpoint: Option<String>,
+    pub pubkey: Option<String>,
+    pub psk: Option<String>,
+    pub mtu: Option<u16>,
+    pub policy: Option<String>,
+    pub is_mhp: bool,
+    pub is_nhp: bool,
+    pub is_prefer_lla: bool,
+    pub session_type: Option<String>,
+    pub wg_status: Option<String>,
+    pub bird_status: Option<String>,
+    pub my_v4: String,
+    pub my_v6: String,
+    pub my_lla: String,
+    pub my_pubkey: String,
+}
+
+// --- config parsing ---
+
+struct WgInfo {
+    port: u16,
+    v4_peer: Option<String>,
+    v6_peer: Option<String>,
+    lla_peer: Option<String>,
+    endpoint: Option<String>,
+    pubkey: Option<String>,
+    psk: Option<String>,
+    mtu: Option<u16>,
+}
+
+struct BirdInfo {
+    policy: Option<String>,
+    is_mhp: bool,
+    is_nhp: bool,
+    is_prefer_lla: bool,
+    session_type: Option<String>,
+    sessions: Vec<(u8, String)>, // (version, neighbor) for birdc queries
+}
+
+fn parse_wg_config(path: &str) -> WgInfo {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => {
+            return WgInfo {
+                port: 0,
+                v4_peer: None,
+                v6_peer: None,
+                lla_peer: None,
+                endpoint: None,
+                pubkey: None,
+                psk: None,
+                mtu: None,
+            };
+        }
+    };
+
+    let mut port = 0u16;
+    let mut v4_peer = None;
+    let mut v6_peer = None;
+    let mut lla_peer = None;
+    let mut endpoint = None;
+    let mut pubkey = None;
+    let mut psk = None;
+    let mut mtu = None;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('[') {
+            continue;
+        }
+
+        if let Some(val) = parse_after(line, "ListenPort = ") {
+            port = val.parse().unwrap_or(0);
+        } else if let Some(val) = parse_after(line, "MTU = ") {
+            mtu = Some(val.parse().unwrap_or(1420));
+        } else if let Some(val) = parse_after(line, "PublicKey = ") {
+            pubkey = Some(val.to_string());
+        } else if let Some(val) = parse_after(line, "PresharedKey = ") {
+            psk = Some(val.to_string());
+        } else if let Some(val) = parse_after(line, "Endpoint = ") {
+            endpoint = Some(val.to_string());
+        } else if line.starts_with("PostUp = ip addr add ") {
+            // Format: PostUp = ip addr add {my_ip}/CIDR peer {peer_ip}/CIDR dev %i
+            // Or no peer: PostUp = ip addr add {my_ip}/CIDR dev %i
+            let rest = line.strip_prefix("PostUp = ip addr add ").unwrap();
+            if let Some(peer_section) = rest.split(" peer ").nth(1) {
+                // Extract IP before "/" in "peer {ip}/CIDR dev %i"
+                let ip = peer_section.split('/').next().unwrap_or("");
+                if ip.starts_with("fe80:") {
+                    lla_peer = Some(ip.to_string());
+                } else if ip.contains(':') {
+                    v6_peer = Some(ip.to_string());
+                } else if ip.contains('.') {
+                    v4_peer = Some(ip.to_string());
+                }
+            }
+        }
+    }
+
+    WgInfo {
+        port,
+        v4_peer,
+        v6_peer,
+        lla_peer,
+        endpoint,
+        pubkey,
+        psk,
+        mtu,
+    }
+}
+
+fn parse_bird_config(path: &str) -> BirdInfo {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => {
+            return BirdInfo {
+                policy: None,
+                is_mhp: false,
+                is_nhp: false,
+                is_prefer_lla: false,
+                session_type: None,
+                sessions: vec![],
+            };
+        }
+    };
+
+    let mut policy = None;
+    let mut is_mhp = false;
+    let mut is_nhp = false;
+    let mut is_prefer_lla = false;
+    let mut versions_seen = vec![];
+    let mut sessions = vec![];
+    let mut has_block_ipv4 = false;
+    let mut has_block_ipv6 = false;
+
+    for line in content.lines() {
+        let line = line.trim();
+
+        // "protocol bgp DN42_{asn}_v{4|6} from dn42_peers {"
+        if line.starts_with("protocol bgp DN42_") {
+            if let Some(ver_str) = line
+                .strip_prefix("protocol bgp DN42_")
+                .and_then(|rest| rest.split_once('_'))
+                .and_then(|(_, after)| after.strip_prefix('v'))
+            {
+                if let Some(ver) = ver_str
+                    .split_whitespace()
+                    .next()
+                    .and_then(|v| v.parse::<u8>().ok())
+                {
+                    versions_seen.push(ver);
+                }
+            }
+        }
+
+        // neighbor line
+        if let Some(neighbor) = parse_after(line, "neighbor ") {
+            let neighbor = neighbor.split_whitespace().next().unwrap_or("").to_string();
+            if let Some(&ver) = versions_seen.last() {
+                sessions.push((ver, neighbor));
+            }
+        }
+
+        // policy comment
+        if line.starts_with("# policy: ") || line.starts_with("\t# policy: ") {
+            let raw = line.split("# policy:").nth(1).unwrap_or("").trim();
+            // strip the leading "{policy:?}" debug part
+            if let Some(pol) = raw.split_whitespace().next() {
+                if !pol.starts_with('(') {
+                    policy = Some(pol.to_string());
+                } else {
+                    policy = Some(raw.to_string());
+                }
+            }
+            if raw.contains("prefer LLA") {
+                is_prefer_lla = true;
+            }
+        }
+
+        // ipv4 { import none; export none; }
+        if line == "ipv4 {" {
+            has_block_ipv4 = true;
+        }
+        if line == "ipv6 {" {
+            has_block_ipv6 = true;
+        }
+    }
+
+    // Determine session type from versions seen and blocked AFs
+    let session_type = if versions_seen.len() == 1 {
+        let v = versions_seen[0];
+        let has_both_blocked = has_block_ipv4 || has_block_ipv6;
+        if has_both_blocked {
+            // Single channel: one version peers but blocks the other AF
+            if v == 6 {
+                is_mhp = true;
+                is_nhp = true; // v6 carrying v4 routes → ENH
+                Some("mpbgp_v6".to_string())
+            } else {
+                is_mhp = true;
+                Some("mpbgp_v4".to_string())
+            }
+        } else {
+            Some(format!("v{v}"))
+        }
+    } else if versions_seen.len() == 2 {
+        // Two separate sessions (no MP-BGP)
+        Some("dual".to_string())
+    } else {
+        None
+    };
+
+    BirdInfo {
+        policy,
+        is_mhp,
+        is_nhp,
+        is_prefer_lla,
+        session_type,
+        sessions,
+    }
 }
 
 // --- config builders ---
@@ -342,6 +629,20 @@ fn run_birdc_configure() {
     run_cmd("birdc", &["c"]);
 }
 
+fn run_bird_status(_asn: u32, sessions: &[(u8, String)]) -> String {
+    let mut results = Vec::new();
+    for (version, _neighbor) in sessions {
+        let proto = format!("DN42_{}_v{}", _asn, version);
+        let out = run_cmd("birdc", &["show", "protocols", &proto]);
+        if !out.is_empty() {
+            results.push(out);
+        }
+    }
+    results.join("\n")
+}
+
+
+// FIXME: bird 控制需要使用 unix socket 连接到控制端口，以兼容容器运行
 fn run_cmd(bin: &str, args: &[&str]) -> String {
     Command::new(bin)
         .args(args)
@@ -365,4 +666,8 @@ fn parse_asn_header(headers: &HeaderMap) -> Result<u32, StatusCode> {
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse().ok())
         .ok_or(StatusCode::BAD_REQUEST)
+}
+
+fn parse_after<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    line.strip_prefix(prefix).map(|s| s.trim())
 }
