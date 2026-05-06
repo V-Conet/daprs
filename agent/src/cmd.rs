@@ -43,6 +43,14 @@ pub enum Cmd {
         server: Option<String>,
         target: String,
     },
+    /// Raw `wg show` output for a single interface.
+    WgShow {
+        interface: String,
+    },
+    /// Raw `birdc show protocol` output for a single protocol.
+    BirdShow {
+        protocol: String,
+    },
 }
 #[derive(Serialize, Deserialize)]
 pub struct CmdRequest {
@@ -64,23 +72,23 @@ pub async fn cmd_handler(Json(paylod): Json<CmdRequest>) -> Result<String, Statu
             let count = count.unwrap_or(4).to_string();
             let timeout = timeout.unwrap_or(2000).to_string();
 
-            let mut args = vec!["-c", &count, "-w", &timeout];
+            let mut args = vec!["-c".to_string(), count, "-w".to_string(), timeout];
 
-            // if let Some(size) = size {
-            //     args.push("-s");
-            //     args.push(&size.to_string());
-            // }
+            if let Some(size) = size {
+                args.push("-s".to_string());
+                args.push(size.to_string());
+            }
             if dfrag.unwrap_or(false) {
-                args.push("-F");
+                args.push("-F".to_string());
             }
             if let Some(protocol) = protocol {
                 match protocol {
-                    4 => args.push("-4"),
-                    6 => args.push("-6"),
+                    4 => args.push("-4".to_string()),
+                    6 => args.push("-6".to_string()),
                     _ => return Err(StatusCode::BAD_REQUEST),
                 }
             }
-            run_ping(&args, target).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            run_ping(args, target).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
         }
         // TODO: DANGER: VALIDATION REQUIRED
         // so far, proto
@@ -94,35 +102,66 @@ pub async fn cmd_handler(Json(paylod): Json<CmdRequest>) -> Result<String, Statu
             if let Some(server) = server {
                 args.push(format!("@{}", server));
             }
-            run_dig(&args, target).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            run_dig(args, target).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
         }
+        Cmd::WgShow { interface } => run_cmd("wg", &["show", &interface])
+            .map(|output| output.text)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR),
+        Cmd::BirdShow { protocol } => run_cmd("birdc", &["show", "protocol", &protocol])
+            .map(|output| output.text)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
-fn run_ping(args: &[&str], target: String) -> Result<String, axum::http::StatusCode> {
-    let output = Command::new("ping")
-        .args(args)
-        .arg(target.to_lowercase())
-        .output()
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+fn run_ping(args: Vec<String>, target: String) -> Result<String, axum::http::StatusCode> {
+    let mut cmd_args = args;
+    cmd_args.push(target.to_lowercase());
+    let cmd_args = cmd_args.iter().map(String::as_str).collect::<Vec<_>>();
 
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        Err(axum::http::StatusCode::BAD_REQUEST)
-    }
+    run_cmd("ping", &cmd_args)
+        .and_then(|output| {
+            if output.success {
+                Ok(output.text)
+            } else {
+                Err(axum::http::StatusCode::BAD_REQUEST)
+            }
+        })
 }
 
-fn run_dig(args: &[String], target: String) -> Result<String, axum::http::StatusCode> {
-    let output = Command::new("dig")
+fn run_dig(args: Vec<String>, target: String) -> Result<String, axum::http::StatusCode> {
+    let mut cmd_args = args;
+    cmd_args.push(target.to_lowercase());
+    let cmd_args = cmd_args.iter().map(String::as_str).collect::<Vec<_>>();
+
+    run_cmd("dig", &cmd_args)
+        .and_then(|output| {
+            if output.success {
+                Ok(output.text)
+            } else {
+                Err(axum::http::StatusCode::BAD_REQUEST)
+            }
+        })
+}
+
+struct CmdOutput {
+    success: bool,
+    text: String,
+}
+
+fn run_cmd(bin: &str, args: &[&str]) -> Result<CmdOutput, axum::http::StatusCode> {
+    let output = Command::new(bin)
         .args(args)
-        .arg(target.to_lowercase())
         .output()
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let text = if output.status.success() {
+        String::from_utf8_lossy(&output.stdout).into_owned()
     } else {
-        Err(axum::http::StatusCode::BAD_REQUEST)
-    }
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+
+    Ok(CmdOutput {
+        success: output.status.success(),
+        text,
+    })
 }

@@ -53,22 +53,5 @@ pub struct WebConfig {
     pub frontend_origin: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Default)]
-pub struct NetConfig {
-    pub ipv4: bool,
-    pub ipv6: bool,
-    pub accept_nat: bool,
-    pub cn: bool,
-}
-#[derive(Serialize, Deserialize, Clone, Default)]
-pub struct Dn42Config {
-    pub asn: u32,
-    #[serde(default)]
-    pub ipv4: String,
-    #[serde(default)]
-    pub ipv6: String,
-    #[serde(default)]
-    pub lla: String,
-    #[serde(default)]
-    pub wgkey: String,
-}
+#[allow(unused_imports)]
+pub use shared::{Dn42Config, FrontendConfig, NetConfig};

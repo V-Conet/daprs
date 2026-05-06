@@ -8,6 +8,7 @@ use crate::{
 use axum::extract::Path;
 use axum::http::HeaderMap;
 use axum::{Json, extract::State, http::StatusCode};
+use shared::{NodeActionRequest, PeeringPayload, RemoveRequest};
 
 const PEERING_QUEUE: &str = "peering_queue";
 const MODIFY_QUEUE: &str = "modify_queue";
@@ -92,8 +93,10 @@ pub async fn post_remove(
 
     persist_json(&state.db, REMOVE_QUEUE, &req.node, &req)?;
 
-    // Attempt dispatch; if agent is unreachable or file missing, still clean up queues.
-    let dispatch_result = dispatch_to_agent(
+    // Attempt dispatch to agent, but treat it as best-effort: even if the agent
+    // returns an error (for example the underlying files are already missing),
+    // we must still remove any queued actions to avoid stuck state.
+    if let Err(e) = dispatch_to_agent(
         &state,
         &req.node,
         reqwest::Method::DELETE,
@@ -101,13 +104,15 @@ pub async fn post_remove(
         None,
         asn,
     )
-    .await;
+    .await
+    {
+        eprintln!("dispatch_to_agent(delete_peer) failed for {}: {:?}", req.node, e);
+    }
 
     // Always clean up related queues — best effort, ignore individual errors.
     let _ = remove_from_queue(&state.db, PEERING_QUEUE, &req.node);
     let _ = remove_from_queue(&state.db, MODIFY_QUEUE, &req.node);
-
-    dispatch_result?;
+    let _ = remove_from_queue(&state.db, REMOVE_QUEUE, &req.node);
 
     Ok(StatusCode::OK)
 }

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use shared::{Dn42Config, NetConfig};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -52,29 +53,5 @@ pub struct AgentConfig {
     pub net: NetConfig,
     pub dn42: Dn42Config,
 }
-#[derive(Serialize, Deserialize, Clone)]
-pub struct NetConfig {
-    pub ipv4: bool,
-    pub ipv6: bool,
-    pub accept_nat: bool,
-    pub cn: bool,
-}
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Dn42Config {
-    pub asn: u32,
-    pub ipv4: String,
-    pub ipv6: String,
-    pub lla: String,
-    pub wgkey: String,
-}
 
-// for frontend
-#[derive(Serialize, Deserialize, Clone)]
-pub struct FrontendConfig {
-    pub version: u16,
-    pub is_open: bool,
-    pub is_verify: bool,
-    pub extra_msg: String,
-    pub net: NetConfig,
-    pub dn42: Dn42Config,
-}
+pub use shared::FrontendConfig;
