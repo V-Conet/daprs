@@ -1,9 +1,10 @@
+# DAPRS Server 配置
 [server]
 # 协议版本
 version = 1
-# 为 webui 前端提供 API
+# 绑定地址
 bind = "0.0.0.0:8080"
-# 用于 Server/Agent 之间的认证
+# Server/Agent 认证 token
 api_token = "TOKEN"
 # keepalive time in seconds
 alive = 60
@@ -12,17 +13,24 @@ servers = [
     # { name = "server2", address = "IP_ADDRESS:PORT" },
 ]
 
-## provide API for webui
-[web]
-## todo: should have a on/off for webui api
-#enable = true
+# RateLimit
+[server.rate_limit.auth]
+window_secs = 10
+max_requests = 5
 
-# oauth2
+[server.rate_limit.api]
+window_secs = 60
+max_requests = 100
+
+## WebUI 配置
+[web]
+# OAuth 客户端 ID
 client_id = "KEY"
+# OAuth 客户端密钥
 client_secret = "SECRET"
-# 认证服务器地址
+# OAuth Provider 发现地址
 oauth_provider = "https://auth.iedon.net/.well-known/openid-configuration"
-# 认证回调地址
+# OAuth 回调地址（指向 Server API）
 redirect_uri = "http://localhost:8080/api/login/callback"
-# 前端
+# 前端地址（用于 CORS 和登录后重定向）
 frontend_origin = "http://localhost:5173"

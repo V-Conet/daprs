@@ -14,6 +14,7 @@ is_open = true
 is_verify = false
 # 额外信息
 extra_msg = "hello world"
+timeout = 15
 
 [agent.net]
 ## 此节点公网环境
@@ -33,3 +34,5 @@ ipv4 = "DN42_IPv4_ADDRESS"
 ipv6 = "DN42_IPv6_ADDRESS"
 lla = "DN42_LLA_ADDRESS"
 wgkey = "DN42_WG_KEY"
+ipv4_addr = "PUBLIC_IPv4_ADDRESS"
+ipv6_addr = "PUBLIC_IPv6_ADDRESS"

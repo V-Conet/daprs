@@ -1,16 +1,17 @@
-use axum::{
-    Json,
-    extract::State,
-    http::{HeaderMap, StatusCode},
-};
+//! Agent API 模块
+
+use axum::{Json, extract::State, http::HeaderMap};
 
 use crate::config::{Config, FrontendConfig};
+use crate::utils::verify_token;
+use shared::AppError;
 
+/// 获取节点配置信息
 pub async fn get_config(
     headers: HeaderMap,
     State(config): State<Config>,
-) -> Result<Json<FrontendConfig>, axum::http::StatusCode> {
-    require_api_token(&headers, &config)?;
+) -> Result<Json<FrontendConfig>, AppError> {
+    verify_token(&headers, &config)?;
 
     Ok(Json(FrontendConfig {
         version: config.agent.version,
@@ -20,20 +21,4 @@ pub async fn get_config(
         net: config.agent.net,
         dn42: config.agent.dn42,
     }))
-}
-
-pub fn require_api_token(headers: &HeaderMap, config: &Config) -> Result<(), StatusCode> {
-    if config.agent.api_token.is_empty() {
-        return Ok(());
-    }
-
-    let header_value = headers
-        .get("x-api-token")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    if header_value != config.agent.api_token {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    Ok(())
 }

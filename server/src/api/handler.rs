@@ -1,22 +1,33 @@
+//! API Handler 模块
+//!
+//! 处理前端 API 请求
+
 use std::collections::BTreeMap;
+
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::HeaderMap,
+};
+use shared::{AppError, NodeActionRequest, PeeringPayload, RemoveRequest};
 
 use crate::{
     api::oauth::{get_session_asn, persist_json, require_session},
-    api::*,
+    api::{FrontendAgentConfig, NodeAgentConfig},
     config::AppState,
 };
-use axum::extract::Path;
-use axum::http::HeaderMap;
-use axum::{Json, extract::State, http::StatusCode};
-use shared::{NodeActionRequest, PeeringPayload, RemoveRequest};
 
 const PEERING_QUEUE: &str = "peering_queue";
 const MODIFY_QUEUE: &str = "modify_queue";
 const REMOVE_QUEUE: &str = "remove_queue";
 
+// 节点管理
+/// 获取所有节点列表
+///
+/// 查询所有配置的 Agent 节点状态和配置信息
 pub async fn get_nodes(
     State(state): State<AppState>,
-) -> Result<Json<BTreeMap<String, NodeAgentConfig>>, StatusCode> {
+) -> Result<Json<BTreeMap<String, NodeAgentConfig>>, AppError> {
     let client = reqwest::Client::new();
     let mut nodes = BTreeMap::new();
 
@@ -37,13 +48,17 @@ pub async fn get_nodes(
     Ok(Json(nodes))
 }
 
+// Peering 管理
+/// 创建 Peering
+///
+/// 向指定节点发送 Peering 请求
 pub async fn post_peering(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(action): Json<NodeActionRequest<PeeringPayload>>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<axum::http::StatusCode, AppError> {
     let session = require_session(&state, &headers)?;
-    let asn = get_session_asn(&session).ok_or(StatusCode::UNAUTHORIZED)?;
+    let asn = get_session_asn(&session).ok_or(AppError::Unauthorized)?;
 
     persist_json(&state.db, PEERING_QUEUE, &action.node, &action)?;
 
@@ -57,16 +72,19 @@ pub async fn post_peering(
     )
     .await?;
 
-    Ok(StatusCode::CREATED)
+    Ok(axum::http::StatusCode::CREATED)
 }
 
+/// 修改 Peering
+///
+/// 更新已有的 Peering 配置
 pub async fn post_modify(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(action): Json<NodeActionRequest<PeeringPayload>>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<axum::http::StatusCode, AppError> {
     let session = require_session(&state, &headers)?;
-    let asn = get_session_asn(&session).ok_or(StatusCode::UNAUTHORIZED)?;
+    let asn = get_session_asn(&session).ok_or(AppError::Unauthorized)?;
 
     persist_json(&state.db, MODIFY_QUEUE, &action.node, &action)?;
 
@@ -80,22 +98,23 @@ pub async fn post_modify(
     )
     .await?;
 
-    Ok(StatusCode::OK)
+    Ok(axum::http::StatusCode::OK)
 }
 
+/// 删除 Peering
+///
+/// 删除指定的 Peering 配置
 pub async fn post_remove(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<RemoveRequest>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<axum::http::StatusCode, AppError> {
     let session = require_session(&state, &headers)?;
-    let asn = get_session_asn(&session).ok_or(StatusCode::UNAUTHORIZED)?;
+    let asn = get_session_asn(&session).ok_or(AppError::Unauthorized)?;
 
     persist_json(&state.db, REMOVE_QUEUE, &req.node, &req)?;
 
-    // Attempt dispatch to agent, but treat it as best-effort: even if the agent
-    // returns an error (for example the underlying files are already missing),
-    // we must still remove any queued actions to avoid stuck state.
+    // 尝试发送到 Agent，即使失败也清理队列
     if let Err(e) = dispatch_to_agent(
         &state,
         &req.node,
@@ -106,62 +125,71 @@ pub async fn post_remove(
     )
     .await
     {
-        eprintln!("dispatch_to_agent(delete_peer) failed for {}: {:?}", req.node, e);
+        eprintln!(
+            "dispatch_to_agent(delete_peer) failed for {}: {:?}",
+            req.node, e
+        );
     }
 
-    // Always clean up related queues — best effort, ignore individual errors.
+    // 清理相关队列
     let _ = remove_from_queue(&state.db, PEERING_QUEUE, &req.node);
     let _ = remove_from_queue(&state.db, MODIFY_QUEUE, &req.node);
     let _ = remove_from_queue(&state.db, REMOVE_QUEUE, &req.node);
 
-    Ok(StatusCode::OK)
+    Ok(axum::http::StatusCode::OK)
 }
 
+/// 获取 Peering 队列
 pub async fn get_peers(
     State(state): State<AppState>,
-) -> Result<Json<Vec<NodeActionRequest<PeeringPayload>>>, StatusCode> {
+) -> Result<Json<Vec<NodeActionRequest<PeeringPayload>>>, AppError> {
     let peers = read_all_from_queue(&state.db, PEERING_QUEUE)?;
     Ok(Json(peers))
 }
 
+/// 删除 Peering 队列项
 pub async fn delete_peering_queue(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(node): Path<String>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<axum::http::StatusCode, AppError> {
     require_session(&state, &headers)?;
     remove_from_queue(&state.db, PEERING_QUEUE, &node)?;
-    Ok(StatusCode::OK)
+    Ok(axum::http::StatusCode::OK)
 }
 
+/// 删除 Modify 队列项
 pub async fn delete_modify_queue(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(node): Path<String>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<axum::http::StatusCode, AppError> {
     require_session(&state, &headers)?;
     remove_from_queue(&state.db, MODIFY_QUEUE, &node)?;
-    Ok(StatusCode::OK)
+    Ok(axum::http::StatusCode::OK)
 }
 
+/// 删除 Remove 队列项
 pub async fn delete_remove_queue(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(node): Path<String>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<axum::http::StatusCode, AppError> {
     require_session(&state, &headers)?;
     remove_from_queue(&state.db, REMOVE_QUEUE, &node)?;
-    Ok(StatusCode::OK)
+    Ok(axum::http::StatusCode::OK)
 }
 
-/// Proxy CMD execution from webui to the target agent.
-/// The payload is forwarded verbatim — the server does not inspect or validate commands.
+/// 代理命令执行
+///
+/// 将命令请求转发到目标 Agent
 pub async fn post_cmd(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(action): Json<NodeActionRequest<serde_json::Value>>,
-) -> Result<String, StatusCode> {
-    require_session(&state, &headers)?;
+) -> Result<String, AppError> {
+    let session = require_session(&state, &headers)?;
+    get_session_asn(&session).ok_or(AppError::Unauthorized)?;
 
     let server = state
         .config
@@ -169,7 +197,7 @@ pub async fn post_cmd(
         .servers
         .iter()
         .find(|s| s.name == action.node)
-        .ok_or(StatusCode::BAD_REQUEST)?;
+        .ok_or(AppError::BadRequest("node not found".into()))?;
 
     let url = normalize_agent_base_url(&server.address) + "/cmd";
 
@@ -179,23 +207,25 @@ pub async fn post_cmd(
         .json(&action.payload)
         .send()
         .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        .map_err(|_| AppError::BadGateway)?;
 
     if !resp.status().is_success() {
-        return Err(StatusCode::BAD_GATEWAY);
+        return Err(AppError::BadGateway);
     }
 
-    resp.text().await.map_err(|_| StatusCode::BAD_GATEWAY)
+    resp.text().await.map_err(|_| AppError::BadGateway)
 }
 
-/// Query an agent's existing peer configuration (WG + Bird files + live status).
+/// 查询 Peer 信息
+///
+/// 获取指定节点上的 Peer 配置和状态
 pub async fn get_peer_info(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(node): Path<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, AppError> {
     let session = require_session(&state, &headers)?;
-    let asn = get_session_asn(&session).ok_or(StatusCode::UNAUTHORIZED)?;
+    let asn = get_session_asn(&session).ok_or(AppError::Unauthorized)?;
 
     let server = state
         .config
@@ -203,7 +233,7 @@ pub async fn get_peer_info(
         .servers
         .iter()
         .find(|s| s.name == node)
-        .ok_or(StatusCode::BAD_REQUEST)?;
+        .ok_or(AppError::BadRequest("node not found".into()))?;
 
     let url = normalize_agent_base_url(&server.address) + "/peer_info";
 
@@ -213,18 +243,17 @@ pub async fn get_peer_info(
         .header("asn", asn.to_string())
         .send()
         .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        .map_err(|_| AppError::BadGateway)?;
 
     if !resp.status().is_success() {
-        return Err(StatusCode::BAD_GATEWAY);
+        return Err(AppError::BadGateway);
     }
 
-    let json: serde_json::Value = resp.json().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let json: serde_json::Value = resp.json().await.map_err(|_| AppError::BadGateway)?;
     Ok(Json(json))
 }
 
-// --- private ---
-
+/// 向 Agent 发送请求
 async fn dispatch_to_agent(
     state: &AppState,
     node: &str,
@@ -232,14 +261,14 @@ async fn dispatch_to_agent(
     path: &str,
     body: Option<&PeeringPayload>,
     asn: u32,
-) -> Result<(), StatusCode> {
+) -> Result<(), AppError> {
     let server = state
         .config
         .server
         .servers
         .iter()
         .find(|s| s.name == node)
-        .ok_or(StatusCode::BAD_REQUEST)?;
+        .ok_or(AppError::BadRequest("node not found".into()))?;
 
     let url = normalize_agent_base_url(&server.address) + path;
 
@@ -252,13 +281,14 @@ async fn dispatch_to_agent(
         req = req.json(b);
     }
 
-    let resp = req.send().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let resp = req.send().await.map_err(|_| AppError::BadGateway)?;
     if !resp.status().is_success() {
-        return Err(StatusCode::BAD_GATEWAY);
+        return Err(AppError::BadGateway);
     }
     Ok(())
 }
 
+/// 获取 Agent 配置
 async fn fetch_agent_config(
     client: &reqwest::Client,
     api_token: &str,
@@ -274,25 +304,26 @@ async fn fetch_agent_config(
     match resp {
         Ok(r) if r.status().is_success() => match r.json::<FrontendAgentConfig>().await {
             Ok(conf) => (conf, true, None),
-            Err(e) => (
+            Err(_) => (
                 FrontendAgentConfig::default(),
                 false,
-                Some(format!("invalid config: {e}")),
+                Some("agent returned invalid config".to_string()),
             ),
         },
         Ok(r) => (
             FrontendAgentConfig::default(),
             false,
-            Some(format!("agent returned {}", r.status())),
+            Some(format!("agent returned status {}", r.status())),
         ),
-        Err(e) => (
+        Err(_) => (
             FrontendAgentConfig::default(),
             false,
-            Some(format!("agent unavailable: {e}")),
+            Some("agent unavailable".to_string()),
         ),
     }
 }
 
+/// 标准化 Agent URL
 fn normalize_agent_base_url(addr: &str) -> String {
     let addr = addr.trim_end_matches('/');
     if addr.starts_with("http://") || addr.starts_with("https://") {
@@ -302,31 +333,33 @@ fn normalize_agent_base_url(addr: &str) -> String {
     }
 }
 
-fn remove_from_queue(db: &sled::Db, tree_name: &str, node: &str) -> Result<(), StatusCode> {
+/// 从队列中删除
+fn remove_from_queue(db: &sled::Db, tree_name: &str, node: &str) -> Result<(), AppError> {
     let tree = db
         .open_tree(tree_name)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
     tree.remove(node.as_bytes())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
     tree.flush()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
     Ok(())
 }
 
+/// 读取队列中所有项
 fn read_all_from_queue<T: serde::de::DeserializeOwned>(
     db: &sled::Db,
     tree_name: &str,
-) -> Result<Vec<T>, StatusCode> {
+) -> Result<Vec<T>, AppError> {
     let tree = db
         .open_tree(tree_name)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
 
     tree.iter()
         .map(|item| {
-            item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            item.map_err(|e| AppError::InternalError(format!("db error: {e}")))
                 .and_then(|(_, value)| {
                     serde_json::from_slice::<T>(&value)
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                        .map_err(|e| AppError::InternalError(format!("json error: {e}")))
                 })
         })
         .collect::<Result<Vec<_>, _>>()

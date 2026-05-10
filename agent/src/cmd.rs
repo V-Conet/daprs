@@ -1,65 +1,95 @@
-use std::process::Command;
+//! Agent 命令模块
+//!
+//! 提供网络诊断命令（ping, traceroute, dig 等）的执行功能。
 
-use axum::{Json, http::StatusCode};
-use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, Ipv6Addr};
 
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(tag = "op", content = "args")]
-#[serde(rename_all = "lowercase")]
-pub enum Cmd {
-    /// Ping CMD, target:
-    /// ```
-    /// Usage:
-    ///     /ping [options] <dest>
-    /// Options:
-    ///     -c <count>    number of echo requests to send (default: 4)
-    ///     -s <size>     use <size> as number of data bytes to be sent
-    ///     -F            do not fragment packets
-    ///     -t <timeout>  time to wait for response (default: 2000ms)
-    ///     -i <interval> ms between sending each packet (default: 500ms)
-    ///     -4            use IPv4
-    ///     -6            use IPv6
-    /// ```
-    Ping {
-        protocol: Option<u16>,
-        count: Option<u16>,
-        size: Option<u16>,
-        dfrag: Option<bool>,
-        timeout: Option<u32>,
-        target: String,
-    },
-    /// Dig CMD, target:
-    /// e.g. 1
-    /// ```
-    /// Usage: /dig domain {type} {@dns_server}
-    /// 用法：/dig domain {type} {@dns_server}
-    /// Only accept following types
-    /// 只接受以下类型的查询
-    /// ANY, A, AAAA, CNAME, MX, TXT, NS, SOA, SRV, PTR
-    /// ```
-    Dig {
-        qtype: Option<String>,
-        /// included port
-        server: Option<String>,
-        target: String,
-    },
-    /// Raw `wg show` output for a single interface.
-    WgShow {
-        interface: String,
-    },
-    /// Raw `birdc show protocol` output for a single protocol.
-    BirdShow {
-        protocol: String,
-    },
+use axum::{Json, extract::State};
+
+use crate::config::Config;
+use crate::utils::run_cmd;
+use shared::{AppError, Cmd, QueryType};
+
+/// 禁止的字符（命令注入防护）
+const FORBIDDEN_CHARS: &[char] = &[
+    ';', '|', '&', '$', '`', '(', ')', '<', '>', '\n', '\r', '\t',
+];
+
+// 输入验证
+fn validate_target(target: &str) -> Result<(), AppError> {
+    if target.is_empty() || target.len() > 253 {
+        return Err(bad("invalid target"));
+    }
+    if target
+        .chars()
+        .any(|c| FORBIDDEN_CHARS.contains(&c) || c == ' ')
+        || target.starts_with('-')
+    {
+        return Err(bad("invalid target"));
+    }
+    // 纯 IP
+    if target.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+    // [IPv6]:port 格式
+    if target.starts_with('[') && target.contains(']') {
+        let close = target.find(']').unwrap();
+        if target[1..close].parse::<Ipv6Addr>().is_ok() {
+            return Ok(());
+        }
+    }
+    // 纯 IPv6
+    if target.contains(':') && target.parse::<Ipv6Addr>().is_ok() {
+        return Ok(());
+    }
+    // 域名
+    for label in target.split('.') {
+        if label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label.chars().all(|c| c.is_alphanumeric() || c == '-')
+        {
+            return Err(bad("invalid domain"));
+        }
+    }
+    Ok(())
 }
-#[derive(Serialize, Deserialize)]
-pub struct CmdRequest {
-    pub cmd: Cmd,
+
+fn validate_identifier(name: &str, max_len: usize) -> Result<(), AppError> {
+    if name.is_empty()
+        || name.len() > max_len
+        || name.starts_with('-')
+        || !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(bad("invalid name"));
+    }
+    Ok(())
 }
-pub async fn cmd_handler(Json(paylod): Json<CmdRequest>) -> Result<String, StatusCode> {
-    // TODO: all args from request, require validation
-    // so far, this is a proto
-    match paylod.cmd {
+
+fn validate_server(server: &str) -> Result<(), AppError> {
+    let server = server.trim_start_matches('@');
+    if server
+        .chars()
+        .any(|c| FORBIDDEN_CHARS.contains(&c) || c == ' ' || c == '-')
+    {
+        return Err(bad("invalid server"));
+    }
+    validate_target(server)
+}
+
+fn bad(msg: &str) -> AppError {
+    AppError::BadRequest(msg.into())
+}
+
+// API Handler
+pub async fn cmd_handler(
+    State(cfg): State<Config>,
+    Json(cmd): Json<Cmd>,
+) -> Result<String, AppError> {
+    match cmd {
         Cmd::Ping {
             protocol,
             count,
@@ -67,101 +97,113 @@ pub async fn cmd_handler(Json(paylod): Json<CmdRequest>) -> Result<String, Statu
             dfrag,
             timeout,
             target,
-        } => {
-            // basic args
-            let count = count.unwrap_or(4).to_string();
-            let timeout = timeout.unwrap_or(2000).to_string();
-
-            let mut args = vec!["-c".to_string(), count, "-w".to_string(), timeout];
-
-            if let Some(size) = size {
-                args.push("-s".to_string());
-                args.push(size.to_string());
-            }
-            if dfrag.unwrap_or(false) {
-                args.push("-F".to_string());
-            }
-            if let Some(protocol) = protocol {
-                match protocol {
-                    4 => args.push("-4".to_string()),
-                    6 => args.push("-6".to_string()),
-                    _ => return Err(StatusCode::BAD_REQUEST),
-                }
-            }
-            run_ping(args, target).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-        }
-        // TODO: DANGER: VALIDATION REQUIRED
-        // so far, proto
+        } => handle_ping(&cfg, protocol, count, size, dfrag, timeout, target).await,
+        Cmd::Traceroute { protocol, target } => handle_traceroute(&cfg, protocol, target).await,
         Cmd::Dig {
             qtype,
             server,
             target,
-        } => {
-            let mut args = vec![qtype.unwrap_or("A".to_string())];
-
-            if let Some(server) = server {
-                args.push(format!("@{}", server));
-            }
-            run_dig(args, target).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        } => handle_dig(&cfg, qtype, server, target).await,
+        Cmd::WgShow { interface } => {
+            validate_identifier(&interface, 15)?;
+            exec_cmd(&cfg, "wg", &["show", &interface]).await
         }
-        Cmd::WgShow { interface } => run_cmd("wg", &["show", &interface])
-            .map(|output| output.text)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR),
-        Cmd::BirdShow { protocol } => run_cmd("birdc", &["show", "protocol", &protocol])
-            .map(|output| output.text)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR),
+        Cmd::BirdShow { protocol } => {
+            validate_identifier(&protocol, 64)?;
+            exec_cmd(&cfg, "birdc", &["show", "protocol", &protocol]).await
+        }
     }
 }
 
-fn run_ping(args: Vec<String>, target: String) -> Result<String, axum::http::StatusCode> {
-    let mut cmd_args = args;
-    cmd_args.push(target.to_lowercase());
-    let cmd_args = cmd_args.iter().map(String::as_str).collect::<Vec<_>>();
+// Command Handlers
+async fn handle_ping(
+    cfg: &Config,
+    protocol: Option<u16>,
+    count: Option<u16>,
+    size: Option<u16>,
+    dfrag: Option<bool>,
+    timeout_ms: Option<u32>,
+    target: String,
+) -> Result<String, AppError> {
+    validate_target(&target)?;
 
-    run_cmd("ping", &cmd_args)
-        .and_then(|output| {
-            if output.success {
-                Ok(output.text)
-            } else {
-                Err(axum::http::StatusCode::BAD_REQUEST)
-            }
-        })
+    let mut args: Vec<String> = vec![
+        "-c".into(),
+        count.unwrap_or(4).to_string(),
+        "-w".into(),
+        timeout_ms.unwrap_or(2000).to_string(),
+    ];
+
+    if let Some(s) = size {
+        args.extend(["-s".into(), s.to_string()]);
+    }
+    if dfrag.unwrap_or(false) {
+        args.push("-F".into());
+    }
+    match protocol {
+        Some(4) => args.push("-4".into()),
+        Some(6) => args.push("-6".into()),
+        Some(_) => return Err(bad("invalid protocol")),
+        None => {}
+    }
+    args.push(target.to_lowercase());
+
+    exec_cmd_strs(cfg, "ping", &args).await
 }
 
-fn run_dig(args: Vec<String>, target: String) -> Result<String, axum::http::StatusCode> {
-    let mut cmd_args = args;
-    cmd_args.push(target.to_lowercase());
-    let cmd_args = cmd_args.iter().map(String::as_str).collect::<Vec<_>>();
+async fn handle_traceroute(
+    cfg: &Config,
+    protocol: Option<u16>,
+    target: String,
+) -> Result<String, AppError> {
+    validate_target(&target)?;
 
-    run_cmd("dig", &cmd_args)
-        .and_then(|output| {
-            if output.success {
-                Ok(output.text)
-            } else {
-                Err(axum::http::StatusCode::BAD_REQUEST)
-            }
-        })
-}
+    let mut args: Vec<&str> = vec!["-q1", "-N32", "-w1"];
+    match protocol {
+        Some(4) => args.push("-4"),
+        Some(6) => args.push("-6"),
+        Some(_) => return Err(bad("invalid protocol")),
+        None => {}
+    }
+    args.push(&target);
 
-struct CmdOutput {
-    success: bool,
-    text: String,
-}
-
-fn run_cmd(bin: &str, args: &[&str]) -> Result<CmdOutput, axum::http::StatusCode> {
-    let output = Command::new(bin)
-        .args(args)
-        .output()
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let text = if output.status.success() {
-        String::from_utf8_lossy(&output.stdout).into_owned()
+    // traceroute 经常返回非零退出码但仍有输出
+    let output = run_cmd(cfg, "traceroute", &args).await;
+    if output.success || !output.text.is_empty() {
+        Ok(output.text)
     } else {
-        String::from_utf8_lossy(&output.stderr).into_owned()
-    };
+        Err(bad("traceroute failed"))
+    }
+}
 
-    Ok(CmdOutput {
-        success: output.status.success(),
-        text,
-    })
+async fn handle_dig(
+    cfg: &Config,
+    qtype: QueryType,
+    server: Option<String>,
+    target: String,
+) -> Result<String, AppError> {
+    validate_target(&target)?;
+
+    let mut args: Vec<String> = vec![qtype.as_dig_arg().into()];
+    if let Some(s) = server {
+        validate_server(&s)?;
+        args.push(format!("@{}", s.trim_start_matches('@')));
+    }
+    args.push(target.to_lowercase());
+
+    exec_cmd_strs(cfg, "dig", &args).await
+}
+
+async fn exec_cmd(cfg: &Config, bin: &str, args: &[&str]) -> Result<String, AppError> {
+    let output = run_cmd(cfg, bin, args).await;
+    if output.success {
+        Ok(output.text)
+    } else {
+        Err(AppError::BadRequest(output.text))
+    }
+}
+
+async fn exec_cmd_strs(cfg: &Config, bin: &str, args: &[String]) -> Result<String, AppError> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    exec_cmd(cfg, bin, &args).await
 }

@@ -1,3 +1,7 @@
+//! OAuth 认证模块
+//!
+//! 处理 OIDC 认证流程
+
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -15,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::{AppState, WebConfig};
+use shared::AppError;
 
 const LOGIN_STATE_TREE: &str = "oauth_login_state";
 const SESSION_TREE: &str = "oauth_sessions";
@@ -22,16 +27,16 @@ const LOGIN_STATE_TTL_SECS: u64 = 600;
 const SESSION_TTL_SECS: u64 = 8 * 60 * 60;
 const SESSION_COOKIE: &str = "daprs_session";
 
+// OAuth 客户端类型
 type OAuthClient =
     BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
 
-pub async fn login(State(state): State<AppState>) -> Result<Redirect, StatusCode> {
-    let web = state
-        .config
-        .web
-        .as_ref()
-        .ok_or(StatusCode::NOT_IMPLEMENTED)?;
-    let (client, _discovery) = create_oauth_client(web).await?;
+// API Handlers
+/// 发起 OAuth 登录
+///
+/// 重定向到 OAuth Provider 的授权页面。
+pub async fn login(State(state): State<AppState>) -> Result<Redirect, AppError> {
+    let (client, _discovery) = create_oauth_client(&state.config.web).await?;
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     let csrf = CsrfToken::new_random();
@@ -52,36 +57,39 @@ pub async fn login(State(state): State<AppState>) -> Result<Redirect, StatusCode
     Ok(Redirect::to(authorization_url.as_str()))
 }
 
+/// OAuth 回调
+///
+/// 处理 OAuth Provider 的回调，完成登录流程。
 pub async fn login_callback(
     State(state): State<AppState>,
     Query(query): Query<OAuthCallbackQuery>,
-) -> Result<Response, StatusCode> {
-    let web = state
-        .config
-        .web
-        .as_ref()
-        .ok_or(StatusCode::NOT_IMPLEMENTED)?;
+) -> Result<Response, AppError> {
+    let web = &state.config.web;
     let (client, discovery) = create_oauth_client(web).await?;
 
     if query.error.is_some() {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(AppError::Unauthorized);
     }
 
-    let code = query.code.ok_or(StatusCode::BAD_REQUEST)?;
-    let state_value = query.state.ok_or(StatusCode::BAD_REQUEST)?;
+    let code = query
+        .code
+        .ok_or(AppError::BadRequest("missing code".into()))?;
+    let state_value = query
+        .state
+        .ok_or(AppError::BadRequest("missing state".into()))?;
     let login_state = consume_login_state(&state, &state_value)?;
 
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AppError::InternalError(format!("http client error: {e}")))?;
 
     let token = client
         .exchange_code(AuthorizationCode::new(code))
         .set_pkce_verifier(PkceCodeVerifier::new(login_state.pkce_verifier))
         .request_async(&http)
         .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        .map_err(|e| AppError::InternalError(format!("token exchange error: {e}")))?;
 
     let userinfo = fetch_userinfo(&http, &discovery, token.access_token().secret()).await?;
 
@@ -95,17 +103,20 @@ pub async fn login_callback(
 
     persist_json(&state.db, SESSION_TREE, &session_id, &session)?;
 
-    let mut response = Redirect::to("/").into_response();
+    // 登录成功后重定向到前端地址
+    let redirect_url = web.frontend_origin.as_deref().unwrap_or("/");
+    let mut response = Redirect::to(redirect_url).into_response();
     response
         .headers_mut()
         .append(header::SET_COOKIE, build_session_cookie(&session_id, web)?);
     Ok(response)
 }
 
+/// 获取当前用户信息
 pub async fn me(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<MeResponse>, StatusCode> {
+) -> Result<Json<MeResponse>, AppError> {
     let session = require_session(&state, &headers)?;
     Ok(Json(MeResponse {
         issued_at: session.issued_at,
@@ -114,19 +125,20 @@ pub async fn me(
     }))
 }
 
+/// 退出登录
 pub async fn logout(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, AppError> {
     if let Some(session_id) = extract_cookie(&headers, SESSION_COOKIE) {
         let tree = state
             .db
             .open_tree(SESSION_TREE)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
         tree.remove(session_id.as_bytes())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
         tree.flush()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
     }
 
     let mut response = StatusCode::NO_CONTENT.into_response();
@@ -137,102 +149,106 @@ pub async fn logout(
     Ok(response)
 }
 
+/// 认证中间件
+///
+/// 检查请求是否已通过 OAuth 认证
 pub async fn require_auth_middleware(
     State(state): State<AppState>,
     request: Request,
     next: Next,
-) -> Result<Response, StatusCode> {
-    if state.config.web.is_none() {
-        return Ok(next.run(request).await);
+) -> Result<Response, AppError> {
+    // if no oauth configured, block all
+    if state.config.web.oauth_provider.is_empty() {
+        return Err(AppError::Unauthorized);
     }
 
     require_session(&state, request.headers())?;
     Ok(next.run(request).await)
 }
 
-// --- helpers ---
-/// Returns ASN from session
+// Helper Functions
+/// 从 Session 获取 ASN
 pub(crate) fn get_session_asn(session: &OAuthSession) -> Option<u32> {
     session.userinfo.get("sub")?.as_str()?.parse().ok()
 }
 
+/// 验证 Session
 pub(crate) fn require_session(
     state: &AppState,
     headers: &HeaderMap,
-) -> Result<OAuthSession, StatusCode> {
-    let session_id = extract_cookie(headers, SESSION_COOKIE).ok_or(StatusCode::UNAUTHORIZED)?;
+) -> Result<OAuthSession, AppError> {
+    let session_id = extract_cookie(headers, SESSION_COOKIE).ok_or(AppError::Unauthorized)?;
     let tree = state
         .db
         .open_tree(SESSION_TREE)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
 
     let value = tree
         .get(session_id.as_bytes())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    let session: OAuthSession =
-        serde_json::from_slice(&value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?
+        .ok_or(AppError::Unauthorized)?;
+    let session: OAuthSession = serde_json::from_slice(&value)
+        .map_err(|e| AppError::InternalError(format!("json error: {e}")))?;
 
     if session.expires_at <= now_unix_secs() {
         tree.remove(session_id.as_bytes())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
         tree.flush()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        return Err(StatusCode::UNAUTHORIZED);
+            .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
+        return Err(AppError::Unauthorized);
     }
 
     Ok(session)
 }
 
+/// 持久化 JSON 数据
 pub(crate) fn persist_json<T: Serialize>(
     db: &sled::Db,
     tree_name: &str,
     key: &str,
     value: &T,
-) -> Result<(), StatusCode> {
+) -> Result<(), AppError> {
     let tree = db
         .open_tree(tree_name)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let encoded = serde_json::to_vec(value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
+    let encoded = serde_json::to_vec(value)
+        .map_err(|e| AppError::InternalError(format!("json error: {e}")))?;
 
     tree.insert(key.as_bytes(), encoded)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
     tree.flush()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
     Ok(())
 }
 
-// --- private ---
-
-async fn create_oauth_client(web: &WebConfig) -> Result<(OAuthClient, OidcDiscovery), StatusCode> {
+/// 创建 OAuth 客户端
+async fn create_oauth_client(web: &WebConfig) -> Result<(OAuthClient, OidcDiscovery), AppError> {
     if web.client_id.trim().is_empty()
         || web.client_secret.trim().is_empty()
         || web.oauth_provider.trim().is_empty()
         || web.redirect_uri.trim().is_empty()
         || !web.oauth_provider.starts_with("https://")
-        || !(web.redirect_uri.starts_with("https://")
-            || web.redirect_uri.starts_with("http://127.0.0.1")
-            || web.redirect_uri.starts_with("http://localhost"))
+        || !(web.redirect_uri.starts_with("http://") || web.redirect_uri.starts_with("https://"))
     {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(AppError::BadRequest("invalid OAuth config".into()));
     }
 
     let discovery_url = web.oauth_provider.trim_end_matches('/');
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AppError::InternalError(format!("http client error: {e}")))?;
 
     let discovery: OidcDiscovery = http
         .get(discovery_url)
         .send()
         .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?
+        .map_err(|e| AppError::InternalError(format!("discovery error: {e}")))?
         .error_for_status()
-        .map_err(|_| StatusCode::BAD_GATEWAY)?
+        .map_err(|e| AppError::InternalError(format!("discovery error: {e}")))?
         .json()
         .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        .map_err(|e| AppError::InternalError(format!("discovery parse error: {e}")))?;
 
     if !discovery.authorization_endpoint.starts_with("https://")
         || !discovery.token_endpoint.starts_with("https://")
@@ -241,72 +257,79 @@ async fn create_oauth_client(web: &WebConfig) -> Result<(OAuthClient, OidcDiscov
             .as_ref()
             .is_some_and(|u| !u.starts_with("https://"))
     {
-        return Err(StatusCode::BAD_GATEWAY);
+        return Err(AppError::BadRequest("invalid discovery endpoints".into()));
     }
 
     let client = BasicClient::new(ClientId::new(web.client_id.clone()))
         .set_client_secret(ClientSecret::new(web.client_secret.clone()))
         .set_auth_uri(
             AuthUrl::new(discovery.authorization_endpoint.clone())
-                .map_err(|_| StatusCode::BAD_REQUEST)?,
+                .map_err(|e| AppError::InternalError(format!("auth url error: {e}")))?,
         )
         .set_token_uri(
-            TokenUrl::new(discovery.token_endpoint.clone()).map_err(|_| StatusCode::BAD_REQUEST)?,
+            TokenUrl::new(discovery.token_endpoint.clone())
+                .map_err(|e| AppError::InternalError(format!("token url error: {e}")))?,
         )
         .set_redirect_uri(
-            RedirectUrl::new(web.redirect_uri.clone()).map_err(|_| StatusCode::BAD_REQUEST)?,
+            RedirectUrl::new(web.redirect_uri.clone())
+                .map_err(|e| AppError::InternalError(format!("redirect url error: {e}")))?,
         );
 
     Ok((client, discovery))
 }
 
+/// 获取用户信息
 async fn fetch_userinfo(
     http: &reqwest::Client,
     discovery: &OidcDiscovery,
     access_token: &str,
-) -> Result<Value, StatusCode> {
+) -> Result<Value, AppError> {
     let endpoint = discovery
         .userinfo_endpoint
         .as_ref()
-        .ok_or(StatusCode::BAD_GATEWAY)?;
+        .ok_or(AppError::BadRequest(
+            "userinfo endpoint not configured".into(),
+        ))?;
 
     let response = http
         .get(endpoint)
         .bearer_auth(access_token)
         .send()
         .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?
+        .map_err(|e| AppError::InternalError(format!("userinfo request error: {e}")))?
         .error_for_status()
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        .map_err(|e| AppError::InternalError(format!("userinfo error: {e}")))?;
 
     response
         .json::<Value>()
         .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)
+        .map_err(|e| AppError::InternalError(format!("userinfo parse error: {e}")))
 }
 
-fn consume_login_state(state: &AppState, csrf_state: &str) -> Result<OAuthLoginState, StatusCode> {
+/// 消费登录状态
+fn consume_login_state(state: &AppState, csrf_state: &str) -> Result<OAuthLoginState, AppError> {
     let tree = state
         .db
         .open_tree(LOGIN_STATE_TREE)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
 
     let value = tree
         .remove(csrf_state.as_bytes())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::BAD_REQUEST)?;
+        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?
+        .ok_or(AppError::BadRequest("invalid or expired state".into()))?;
     tree.flush()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
 
-    let login_state: OAuthLoginState =
-        serde_json::from_slice(&value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let login_state: OAuthLoginState = serde_json::from_slice(&value)
+        .map_err(|e| AppError::InternalError(format!("json error: {e}")))?;
     if now_unix_secs() > login_state.created_at + LOGIN_STATE_TTL_SECS {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(AppError::BadRequest("state expired".into()));
     }
 
     Ok(login_state)
 }
 
+/// 从 Cookie 中提取值
 fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
     for segment in cookies.split(';') {
@@ -318,7 +341,8 @@ fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
-fn build_session_cookie(session_id: &str, web: &WebConfig) -> Result<HeaderValue, StatusCode> {
+/// 构建 Session Cookie
+fn build_session_cookie(session_id: &str, web: &WebConfig) -> Result<HeaderValue, AppError> {
     let secure = web.redirect_uri.starts_with("https://")
         || web
             .frontend_origin
@@ -334,9 +358,11 @@ fn build_session_cookie(session_id: &str, web: &WebConfig) -> Result<HeaderValue
         "{}={}; Path=/; Max-Age={}; HttpOnly{}{}",
         SESSION_COOKIE, session_id, SESSION_TTL_SECS, same_site, secure_attr,
     );
-    HeaderValue::from_str(&cookie).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    HeaderValue::from_str(&cookie)
+        .map_err(|e| AppError::InternalError(format!("cookie error: {e}")))
 }
 
+/// 获取当前 Unix 时间戳
 fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -344,8 +370,8 @@ fn now_unix_secs() -> u64 {
         .as_secs()
 }
 
-// --- types ---
-
+// 类型
+/// OIDC 发现文档
 #[derive(Deserialize, Clone)]
 struct OidcDiscovery {
     authorization_endpoint: String,
@@ -353,6 +379,7 @@ struct OidcDiscovery {
     userinfo_endpoint: Option<String>,
 }
 
+/// OAuth 回调参数
 #[derive(Deserialize)]
 pub struct OAuthCallbackQuery {
     pub code: Option<String>,
@@ -360,12 +387,14 @@ pub struct OAuthCallbackQuery {
     pub error: Option<String>,
 }
 
+/// OAuth 登录状态
 #[derive(Serialize, Deserialize)]
 struct OAuthLoginState {
     pkce_verifier: String,
     created_at: u64,
 }
 
+/// OAuth Session
 #[derive(Serialize, Deserialize, Clone)]
 pub struct OAuthSession {
     pub userinfo: Value,
@@ -373,6 +402,7 @@ pub struct OAuthSession {
     pub expires_at: u64,
 }
 
+/// 用户信息响应
 #[derive(Serialize)]
 pub struct MeResponse {
     pub issued_at: u64,
