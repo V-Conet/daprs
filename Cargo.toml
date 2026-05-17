@@ -1,5 +1,5 @@
 [workspace]
-members = [ "agent", "server", "shared" ]
+members = [ "agent", "server", "shared" , "tgbot"]
 default-members = [ "server" ]
 resolver = "2"
 

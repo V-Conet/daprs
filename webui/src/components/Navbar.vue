@@ -1,13 +1,17 @@
 <script setup lang="ts">
 import { useAuthStore } from '../stores/auth'
 import { ref, onMounted, watch } from 'vue'
+import { checkAdmin } from '../api'
 
 const authStore = useAuthStore()
 
 // 主题切换
 const isDark = ref(false)
 
-onMounted(() => {
+// 管理员状态
+const isAdmin = ref(false)
+
+onMounted(async () => {
   const savedTheme = localStorage.getItem('theme')
   if (savedTheme === 'dark') {
     isDark.value = true
@@ -18,6 +22,16 @@ onMounted(() => {
   } else {
     isDark.value = window.matchMedia('(prefers-color-scheme: dark)').matches
     document.documentElement.setAttribute('data-bs-theme', isDark.value ? 'dark' : 'light')
+  }
+
+  // 检查管理员状态
+  if (authStore.isLoggedIn) {
+    try {
+      const response = await checkAdmin()
+      isAdmin.value = response.data
+    } catch {
+      isAdmin.value = false
+    }
   }
 })
 
@@ -43,6 +57,14 @@ function handleLogin() {
       </router-link>
 
       <div class="navbar-nav ms-auto d-flex flex-row align-items-center">
+        <!-- 外部链接 -->
+        <a href="https://lg-dn42.vconet.top/" target="_blank" class="nav-link small me-2" :class="isDark ? 'text-light' : 'text-muted'">
+          Looking Glass
+        </a>
+        <a href="https://flap-dn42.vconet.top/" target="_blank" class="nav-link small me-3" :class="isDark ? 'text-light' : 'text-muted'">
+          FlapAlerted
+        </a>
+
         <!-- 主题切换 -->
         <button @click="toggleTheme" class="btn btn-link nav-link p-0 me-2" :title="isDark ? 'Switch to light mode' : 'Switch to dark mode'">
           <svg v-if="isDark" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -65,6 +87,9 @@ function handleLogin() {
           <span class="navbar-text me-2 small" :class="isDark ? 'text-light' : 'text-muted'">
             AS{{ authStore.asn }}
           </span>
+          <router-link v-if="isAdmin" to="/admin" class="nav-link">
+            <i class="bi bi-shield-check"></i>
+          </router-link>
           <router-link to="/tools" class="nav-link">Tools</router-link>
           <button @click="authStore.logoutUser" class="btn btn-outline-primary btn-sm ms-2">
             Logout

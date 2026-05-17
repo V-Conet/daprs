@@ -112,6 +112,15 @@ pub async fn cmd_handler(
             validate_identifier(&protocol, 64)?;
             exec_cmd(&cfg, "birdc", &["show", "protocol", &protocol]).await
         }
+        Cmd::TcPing {
+            protocol,
+            target,
+            port,
+            count,
+            timeout,
+        } => handle_tcping(&cfg, protocol, target, port, count, timeout).await,
+        Cmd::Route { protocol, target } => handle_route(&cfg, protocol, target).await,
+        Cmd::Path { protocol, target } => handle_path(&cfg, protocol, target).await,
     }
 }
 
@@ -192,6 +201,104 @@ async fn handle_dig(
     args.push(target.to_lowercase());
 
     exec_cmd_strs(cfg, "dig", &args).await
+}
+
+async fn handle_tcping(
+    cfg: &Config,
+    protocol: Option<u16>,
+    target: String,
+    port: u16,
+    count: Option<u16>,
+    timeout: Option<u8>,
+) -> Result<String, AppError> {
+    validate_target(&target)?;
+
+    let mut args: Vec<String> = vec![
+        "--no-color".into(),
+        "-c".into(),
+        count.unwrap_or(5).to_string(),
+        "-t".into(),
+        timeout.unwrap_or(3).to_string(),
+    ];
+
+    match protocol {
+        Some(4) => args.push("-4".into()),
+        Some(6) => args.push("-6".into()),
+        Some(_) => return Err(bad("invalid protocol")),
+        None => {}
+    }
+
+    args.push(target);
+    args.push(port.to_string());
+
+    exec_cmd_strs(cfg, "tcping", &args).await
+}
+
+async fn handle_route(
+    cfg: &Config,
+    protocol: Option<u16>,
+    target: String,
+) -> Result<String, AppError> {
+    validate_target(&target)?;
+
+    let table = match protocol {
+        Some(4) => "master4",
+        Some(6) => "master6",
+        Some(_) => return Err(bad("invalid protocol")),
+        None => "master",
+    };
+
+    exec_cmd(
+        cfg,
+        "birdc",
+        &[
+            "show", "route", "table", table, "for", &target, "all", "primary",
+        ],
+    )
+    .await
+}
+
+async fn handle_path(
+    cfg: &Config,
+    protocol: Option<u16>,
+    target: String,
+) -> Result<String, AppError> {
+    validate_target(&target)?;
+
+    let table = match protocol {
+        Some(4) => "master4",
+        Some(6) => "master6",
+        Some(_) => return Err(bad("invalid protocol")),
+        None => "master",
+    };
+
+    let output = run_cmd(
+        cfg,
+        "birdc",
+        &[
+            "show", "route", "table", table, "for", &target, "all", "primary",
+        ],
+    )
+    .await;
+
+    if !output.success && output.text.is_empty() {
+        return Err(bad("route lookup failed"));
+    }
+
+    let mut path_lines = Vec::new();
+    for line in output.text.lines() {
+        if line.contains("BGP.as_path:") {
+            if let Some(path) = line.split(':').nth(1) {
+                path_lines.push(path.trim());
+            }
+        }
+    }
+
+    if path_lines.is_empty() {
+        Ok("No AS path found".into())
+    } else {
+        Ok(path_lines.join("\n"))
+    }
 }
 
 async fn exec_cmd(cfg: &Config, bin: &str, args: &[&str]) -> Result<String, AppError> {

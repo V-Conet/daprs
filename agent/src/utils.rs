@@ -10,7 +10,7 @@ use axum::{
 };
 
 use crate::config::Config;
-use shared::AppError;
+use shared::{AppError, validation::validate_asn};
 
 /// 命令执行结果
 #[derive(Debug)]
@@ -89,6 +89,10 @@ pub fn verify_token(headers: &HeaderMap, config: &Config) -> Result<(), AppError
 }
 
 /// 从请求头解析 ASN
+///
+/// 验证 ASN 格式：
+/// - 必须为有效的 u32 数字
+/// - 不能为 0
 pub fn parse_asn_header(headers: &HeaderMap) -> Result<u32, AppError> {
     let asn: u32 = headers
         .get("asn")
@@ -97,8 +101,9 @@ pub fn parse_asn_header(headers: &HeaderMap) -> Result<u32, AppError> {
         .ok_or(AppError::BadRequest("invalid ASN".into()))?;
 
     if asn == 0 {
-        return Err(AppError::BadRequest("invalid ASN: must be positive".into()));
+        return Err(AppError::BadRequest("invalid ASN".into()));
     }
+    // validate_asn(asn).map_err(|e| AppError::BadRequest(e.into()))?;
 
     Ok(asn)
 }

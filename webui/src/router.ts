@@ -34,6 +34,18 @@ const routes = [
     meta: { requiresAuth: true }
   },
   {
+    path: '/admin',
+    name: 'Admin',
+    component: () => import('./views/Admin.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true }
+  },
+  {
+    path: '/admin/modify/:node/:asn',
+    name: 'AdminModify',
+    component: () => import('./views/AdminModify.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true }
+  },
+  {
     path: '/login',
     name: 'Login',
     component: () => import('./views/Login.vue'),

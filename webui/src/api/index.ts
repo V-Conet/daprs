@@ -160,3 +160,35 @@ export interface PeerInfoResponse {
   wg: WgConfig | null
   bird: BirdConfig | null
 }
+
+// ============================================================================
+// Admin API
+// ============================================================================
+
+export interface PendingRequest {
+  id: string
+  node: string
+  asn: number
+  payload: PeeringPayload
+  created_at: number
+}
+
+export interface AdminPeerRequest {
+  node: string
+  asn: number
+  payload: PeeringPayload
+}
+
+export interface AdminDeleteRequest {
+  node: string
+  asn: number
+}
+
+// Admin API
+export const checkAdmin = () => api.get<boolean>('/admin/check')
+export const getPendingRequests = () => api.get<PendingRequest[]>('/admin/pending')
+export const approveRequest = (id: string) => api.post(`/admin/pending/${id}/approve`)
+export const rejectRequest = (id: string) => api.post(`/admin/pending/${id}/reject`)
+export const getAllPeers = () => api.get<Record<string, PeerInfoResponse[]>>('/admin/peers')
+export const adminModifyPeer = (data: AdminPeerRequest) => api.post('/admin/peer/modify', data)
+export const adminDeletePeer = (data: AdminDeleteRequest) => api.post('/admin/peer/delete', data)

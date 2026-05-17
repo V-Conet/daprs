@@ -1,6 +1,10 @@
 //! OAuth 认证模块
 //!
 //! 处理 OIDC 认证流程
+//!
+//! 支持的 OIDC Provider:
+//! - Kioubit, scope: dn42
+//! - iEdon
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -13,12 +17,13 @@ use axum::{
 };
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointNotSet, EndpointSet,
-    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, TokenResponse, TokenUrl, basic::BasicClient,
+    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse, TokenUrl,
+    basic::BasicClient,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::config::{AppState, WebConfig};
+use crate::config::{AppState, OidcProvider, WebConfig};
 use shared::AppError;
 
 const LOGIN_STATE_TREE: &str = "oauth_login_state";
@@ -36,16 +41,24 @@ type OAuthClient =
 ///
 /// 重定向到 OAuth Provider 的授权页面。
 pub async fn login(State(state): State<AppState>) -> Result<Redirect, AppError> {
-    let (client, _discovery) = create_oauth_client(&state.config.web).await?;
+    let (client, _) = create_oauth_client(&state.config.web).await?;
+    let provider = state.config.web.provider;
 
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     let csrf = CsrfToken::new_random();
     let csrf_secret = csrf.secret().to_string();
 
-    let (authorization_url, _) = client
+    let mut auth_request = client
         .authorize_url(|| csrf)
         .set_pkce_challenge(pkce_challenge)
-        .url();
+        .add_scope(Scope::new("openid".to_string()));
+
+    // Kioubit 需要 dn42 scope 来获取 ASN
+    if matches!(provider, OidcProvider::Kioubit) {
+        auth_request = auth_request.add_scope(Scope::new("dn42".to_string()));
+    }
+
+    let (authorization_url, _) = auth_request.url();
 
     let login_state = OAuthLoginState {
         pkce_verifier: pkce_verifier.secret().to_string(),
@@ -93,10 +106,23 @@ pub async fn login_callback(
 
     let userinfo = fetch_userinfo(&http, &discovery, token.access_token().secret()).await?;
 
+    // 提取 ASN
+    let asn = extract_asn(&userinfo)
+        .ok_or_else(|| AppError::BadRequest("cannot extract ASN from userinfo".into()))?;
+
+    // 将 ASN 存储到 userinfo 中，确保后续可以提取
+    let mut userinfo_with_asn = userinfo;
+    if let Some(obj) = userinfo_with_asn.as_object_mut() {
+        obj.insert("_asn".to_string(), Value::Number(asn.into()));
+    }
+
     let session_id = CsrfToken::new_random().secret().to_string();
     let now = now_unix_secs();
+    let is_admin = state.config.server.admins.contains(&asn);
     let session = OAuthSession {
-        userinfo,
+        userinfo: userinfo_with_asn,
+        asn,
+        is_admin,
         issued_at: now,
         expires_at: now + SESSION_TTL_SECS,
     };
@@ -157,19 +183,44 @@ pub async fn require_auth_middleware(
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    // if no oauth configured, block all
-    if state.config.web.oauth_provider.is_empty() {
-        return Err(AppError::Unauthorized);
-    }
-
     require_session(&state, request.headers())?;
     Ok(next.run(request).await)
 }
 
 // Helper Functions
 /// 从 Session 获取 ASN
-pub(crate) fn get_session_asn(session: &OAuthSession) -> Option<u32> {
-    session.userinfo.get("sub")?.as_str()?.parse().ok()
+pub(crate) fn get_session_asn(session: &OAuthSession) -> u32 {
+    session.asn
+}
+
+/// 检查 Session 是否为管理员
+pub(crate) fn is_session_admin(session: &OAuthSession) -> bool {
+    session.is_admin
+}
+
+/// 验证是否为管理员
+///
+/// 每次请求都重新检查配置中的管理员列表，确保权限变更立即生效
+pub(crate) fn require_admin(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<OAuthSession, AppError> {
+    let session = require_session(state, headers)?;
+    // 每次请求都重新检查，确保配置变更立即生效
+    if !state.config.server.admins.contains(&session.asn) {
+        return Err(AppError::Unauthorized);
+    }
+    Ok(session)
+}
+
+/// 从 userinfo 提取 ASN
+
+fn extract_asn(userinfo: &Value) -> Option<u32> {
+    userinfo
+        .get("dn42")
+        .and_then(|claim| claim.get("asn"))
+        .and_then(|asn_val| asn_val.as_u64())
+        .and_then(|n| u32::try_from(n).ok())
 }
 
 /// 验证 Session
@@ -223,17 +274,23 @@ pub(crate) fn persist_json<T: Serialize>(
 
 /// 创建 OAuth 客户端
 async fn create_oauth_client(web: &WebConfig) -> Result<(OAuthClient, OidcDiscovery), AppError> {
-    if web.client_id.trim().is_empty()
-        || web.client_secret.trim().is_empty()
-        || web.oauth_provider.trim().is_empty()
-        || web.redirect_uri.trim().is_empty()
-        || !web.oauth_provider.starts_with("https://")
+    // 验证基本配置
+    if web.client_id.trim().is_empty() || web.client_secret.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "invalid OAuth config: missing client_id or client_secret".into(),
+        ));
+    }
+    if web.redirect_uri.trim().is_empty()
         || !(web.redirect_uri.starts_with("http://") || web.redirect_uri.starts_with("https://"))
     {
-        return Err(AppError::BadRequest("invalid OAuth config".into()));
+        return Err(AppError::BadRequest(
+            "invalid OAuth config: invalid redirect_uri".into(),
+        ));
     }
 
-    let discovery_url = web.oauth_provider.trim_end_matches('/');
+    let discovery_url = web.discovery_url();
+
+    // 获取 discovery 文档
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
@@ -250,6 +307,7 @@ async fn create_oauth_client(web: &WebConfig) -> Result<(OAuthClient, OidcDiscov
         .await
         .map_err(|e| AppError::InternalError(format!("discovery parse error: {e}")))?;
 
+    // 验证 discovery 端点
     if !discovery.authorization_endpoint.starts_with("https://")
         || !discovery.token_endpoint.starts_with("https://")
         || discovery
@@ -260,6 +318,7 @@ async fn create_oauth_client(web: &WebConfig) -> Result<(OAuthClient, OidcDiscov
         return Err(AppError::BadRequest("invalid discovery endpoints".into()));
     }
 
+    // 创建 OAuth 客户端
     let client = BasicClient::new(ClientId::new(web.client_id.clone()))
         .set_client_secret(ClientSecret::new(web.client_secret.clone()))
         .set_auth_uri(
@@ -397,8 +456,15 @@ struct OAuthLoginState {
 /// OAuth Session
 #[derive(Serialize, Deserialize, Clone)]
 pub struct OAuthSession {
+    /// 用户信息
     pub userinfo: Value,
+    /// 登录 ASN
+    pub asn: u32,
+    /// 是否为管理员
+    pub is_admin: bool,
+    /// 签发时间
     pub issued_at: u64,
+    /// 过期时间
     pub expires_at: u64,
 }
 

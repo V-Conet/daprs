@@ -72,6 +72,7 @@ async fn run() -> Result<()> {
         .route("/modify_peer", post(wb::modify_config))
         .route("/delete_peer", delete(wb::delete_config))
         .route("/peer_info", get(wb::get_peer_info))
+        .route("/peers", get(wb::list_all_peers))
         .layer(TraceLayer::new_for_http())
         .route_layer(middleware::from_fn_with_state(
             config.clone(),

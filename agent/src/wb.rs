@@ -14,6 +14,10 @@ use crate::config::Config;
 use crate::utils::{parse_asn_header, run_cmd};
 use shared::{
     AppError, BirdConfig, PeerInfo, PeerInfoResponse, PeeringPayload, RawCommandOutput, WgConfig,
+    validation::{
+        validate_dn42_ipv4, validate_dn42_ipv6, validate_endpoint, validate_mtu, validate_port,
+        validate_wg_key,
+    },
 };
 
 // API Handlers
@@ -117,6 +121,46 @@ pub async fn delete_config(
     }
 
     Ok(StatusCode::OK)
+}
+
+/// 列出所有 Peer
+///
+/// 扫描配置目录，返回所有已配置的 Peer ASN 列表
+pub async fn list_all_peers(State(cfg): State<Config>) -> Result<Json<Vec<u32>>, AppError> {
+    let mut peers = std::collections::HashSet::new();
+
+    // 扫描 WireGuard 配置目录
+    if let Ok(entries) = std::fs::read_dir(&cfg.agent.wg_path) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if let Some(asn_str) = name
+                    .strip_prefix("dn42-")
+                    .and_then(|s| s.strip_suffix(".conf"))
+                {
+                    if let Ok(asn) = asn_str.parse::<u32>() {
+                        peers.insert(asn);
+                    }
+                }
+            }
+        }
+    }
+
+    // 扫描 Bird 配置目录
+    if let Ok(entries) = std::fs::read_dir(&cfg.agent.bird_path) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if let Some(asn_str) = name.strip_suffix(".conf") {
+                    if let Ok(asn) = asn_str.parse::<u32>() {
+                        peers.insert(asn);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut peers: Vec<u32> = peers.into_iter().collect();
+    peers.sort();
+    Ok(Json(peers))
 }
 
 /// 查询 Peer 信息
@@ -568,88 +612,29 @@ fn parse_bird_config(path: &str) -> Result<BirdConfig, AppError> {
 // 输入验证
 /// 验证 Peering 请求参数
 fn validate_peering_payload(peer: &PeeringPayload) -> Result<(), AppError> {
-    // 验证公钥格式 (WireGuard 公钥为 44 字符 base64)
-    if peer.pubkey.len() != 44 || !is_valid_base64(&peer.pubkey) {
-        return Err(AppError::BadRequest("invalid public key format".into()));
-    }
+    validate_wg_key(&peer.pubkey).map_err(|e| AppError::BadRequest(e.into()))?;
 
-    // 验证 endpoint 长度和格式
-    if peer.endpoint.is_empty() || peer.endpoint.len() > 256 {
-        return Err(AppError::BadRequest("invalid endpoint".into()));
-    }
-    // 防止注入攻击：endpoint 不应包含特殊字符
-    if peer
-        .endpoint
-        .contains(|c: char| c == '\n' || c == '\r' || c == '\0' || c == '"')
-    {
-        return Err(AppError::BadRequest(
-            "invalid characters in endpoint".into(),
-        ));
-    }
+    validate_endpoint(&peer.endpoint).map_err(|e| AppError::BadRequest(e.into()))?;
 
-    // 验证预共享密钥（如果提供）
     if let Some(ref psk) = peer.psk {
-        if psk.len() != 44 || !is_valid_base64(psk) {
-            return Err(AppError::BadRequest("invalid preshared key format".into()));
-        }
+        validate_wg_key(psk).map_err(|e| AppError::BadRequest(e.into()))?;
     }
 
-    // 验证 IPv4 地址格式（如果提供）
     if let Some(ref v4) = peer.v4 {
-        if !is_valid_ipv4(v4) {
-            return Err(AppError::BadRequest("invalid IPv4 address".into()));
-        }
+        validate_dn42_ipv4(v4).map_err(|e| AppError::BadRequest(e.into()))?;
     }
 
-    // 验证 IPv6 地址格式（如果提供）
     if let Some(ref v6) = peer.v6 {
-        if !is_valid_ipv6(v6) {
-            return Err(AppError::BadRequest("invalid IPv6 address".into()));
-        }
+        validate_dn42_ipv6(v6).map_err(|e| AppError::BadRequest(e.into()))?;
     }
 
-    // 验证 MTU 范围
     if let Some(mtu) = peer.mtu {
-        if mtu < 576 || mtu > 9000 {
-            return Err(AppError::BadRequest(
-                "MTU must be between 576 and 9000".into(),
-            ));
-        }
+        validate_mtu(mtu).map_err(|e| AppError::BadRequest(e.into()))?;
     }
 
-    // 验证端口范围
     if let Some(port) = peer.custom_port {
-        if port < 1024 {
-            return Err(AppError::BadRequest(
-                "port must be between 1024 and 65535".into(),
-            ));
-        }
+        validate_port(port).map_err(|e| AppError::BadRequest(e.into()))?;
     }
 
     Ok(())
-}
-
-/// 检查是否为有效的 base64 字符串
-fn is_valid_base64(s: &str) -> bool {
-    s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
-}
-
-/// 检查是否为有效的 IPv4 地址
-fn is_valid_ipv4(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 4 {
-        return false;
-    }
-    parts.iter().all(|p| p.parse::<u8>().is_ok())
-}
-
-/// 检查是否为有效的 IPv6 地址（简化检查）
-fn is_valid_ipv6(s: &str) -> bool {
-    // 简化检查：长度和字符范围
-    if s.is_empty() || s.len() > 45 {
-        return false;
-    }
-    s.chars()
-        .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
 }

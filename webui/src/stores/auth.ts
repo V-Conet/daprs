@@ -12,6 +12,13 @@ export const useAuthStore = defineStore('auth', () => {
   const isLoggedIn = computed(() => user.value !== null)
   const asn = computed(() => {
     if (!user.value) return null
+    // 优先从 _asn 字段获取（server 存储）
+    const asn = (user.value.userinfo as any)?._asn
+    if (asn) return asn
+    // 回退到 dn42.asn（Kioubit 格式）
+    const dn42Asn = (user.value.userinfo as any)?.dn42?.asn
+    if (dn42Asn) return dn42Asn
+    // 兼容旧格式：从 sub 解析数字
     const sub = user.value.userinfo?.sub
     return sub ? parseInt(sub as string) : null
   })

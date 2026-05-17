@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::middleware;
-use axum::response::Html;
 use axum::routing::{delete, get, post};
 use clap::Parser;
 use tokio::net::TcpListener;
@@ -114,6 +113,20 @@ async fn run() -> Result<()> {
         .route("/api/remove/{node}", delete(handler::delete_remove_queue))
         .route("/api/cmd", post(handler::post_cmd))
         .route("/api/peer/{node}/info", get(handler::get_peer_info))
+        // 管理员 API
+        .route("/api/admin/pending", get(handler::get_pending_requests))
+        .route(
+            "/api/admin/pending/{id}/approve",
+            post(handler::approve_request),
+        )
+        .route(
+            "/api/admin/pending/{id}/reject",
+            post(handler::reject_request),
+        )
+        .route("/api/admin/peers", get(handler::get_all_peers))
+        .route("/api/admin/peer/modify", post(handler::admin_modify_peer))
+        .route("/api/admin/peer/delete", post(handler::admin_delete_peer))
+        .route("/api/admin/check", get(handler::check_admin))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             oauth::require_auth_middleware,

@@ -20,6 +20,15 @@ const tracerouteProtocol = ref<number | null>(null)
 const digType = ref('A')
 const digServer = ref('')
 
+// TcPing 参数
+const tcpingPort = ref(443)
+const tcpingCount = ref(5)
+const tcpingTimeout = ref(3)
+const tcpingProtocol = ref<number | null>(null)
+
+// Route/Path 参数
+const routeProtocol = ref<number | null>(null)
+
 // 目标地址
 const target = ref('')
 
@@ -94,6 +103,36 @@ async function executeCommand() {
           }
         }
         break
+      case 'tcping':
+        cmd = {
+          op: 'tcping',
+          args: {
+            target: target.value.trim(),
+            port: tcpingPort.value || 443,
+            count: tcpingCount.value || 5,
+            timeout: tcpingTimeout.value || 3,
+            protocol: tcpingProtocol.value
+          }
+        }
+        break
+      case 'route':
+        cmd = {
+          op: 'route',
+          args: {
+            target: target.value.trim(),
+            protocol: routeProtocol.value
+          }
+        }
+        break
+      case 'path':
+        cmd = {
+          op: 'path',
+          args: {
+            target: target.value.trim(),
+            protocol: routeProtocol.value
+          }
+        }
+        break
     }
 
     const response = await executeCmd(selectedNode.value, cmd)
@@ -145,7 +184,10 @@ function clearOutput() {
             <select v-model="cmdType" class="form-select">
               <option value="ping">Ping</option>
               <option value="traceroute">Traceroute</option>
+              <option value="tcping">TCP Ping</option>
               <option value="dig">Dig</option>
+              <option value="route">Route</option>
+              <option value="path">AS Path</option>
             </select>
           </div>
 
@@ -218,6 +260,42 @@ function clearOutput() {
           <div class="col-md-4">
             <label class="form-label small">DNS Server (optional)</label>
             <input v-model="digServer" type="text" class="form-control form-control-sm" placeholder="e.g., 172.20.0.53" />
+          </div>
+        </div>
+
+        <!-- TcPing 参数 -->
+        <div v-if="cmdType === 'tcping'" class="row g-3 mt-2 pt-3 border-top">
+          <div class="col-md-2">
+            <label class="form-label small">Port</label>
+            <input v-model.number="tcpingPort" type="number" class="form-control form-control-sm" min="1" max="65535" />
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small">Count</label>
+            <input v-model.number="tcpingCount" type="number" class="form-control form-control-sm" min="1" max="20" />
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small">Timeout (s)</label>
+            <input v-model.number="tcpingTimeout" type="number" class="form-control form-control-sm" min="1" max="30" />
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small">Protocol</label>
+            <select v-model="tcpingProtocol" class="form-select form-select-sm">
+              <option :value="null">Auto</option>
+              <option :value="4">IPv4</option>
+              <option :value="6">IPv6</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Route/Path 参数 -->
+        <div v-if="cmdType === 'route' || cmdType === 'path'" class="row g-3 mt-2 pt-3 border-top">
+          <div class="col-md-3">
+            <label class="form-label small">Protocol</label>
+            <select v-model="routeProtocol" class="form-select form-select-sm">
+              <option :value="null">Auto</option>
+              <option :value="4">IPv4</option>
+              <option :value="6">IPv6</option>
+            </select>
           </div>
         </div>
       </div>

@@ -30,7 +30,7 @@ pub struct AppState {
 /// [server.rate_limit.auth]
 /// window_secs = 10
 /// max_requests = 5
-
+///
 /// [server.rate_limit.api]
 /// window_secs = 60
 /// max_requests = 100
@@ -38,7 +38,7 @@ pub struct AppState {
 /// [web]
 /// client_id = "KEY"
 /// client_secret = "SECRET"
-/// oauth_provider = "https://auth.example.com/.well-known/openid-configuration"
+/// provider = "kioubit"  # "kioubit" 或 "iedon"
 /// redirect_uri = "http://localhost:8080/api/login/callback"
 /// frontend_origin = "http://localhost:5173"
 /// ```
@@ -66,6 +66,9 @@ pub struct ServerConfig {
     /// 速率限制配置（可选）
     #[serde(default)]
     pub rate_limit: Option<RateLimitConfig>,
+    /// 管理员 ASN 列表（可操作任意 ASN）
+    #[serde(default)]
+    pub admins: Vec<u32>,
 }
 
 /// Agent 服务器信息
@@ -77,6 +80,26 @@ pub struct ServerInfo {
     pub address: String,
 }
 
+/// 预定义的 OIDC Provider
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OidcProvider {
+    /// Kioubit DN42 OAuth
+    Kioubit,
+    /// iEdon DN42 OAuth
+    IEdon,
+}
+
+impl OidcProvider {
+    /// 获取 Discovery URL
+    pub fn discovery_url(&self) -> &'static str {
+        match self {
+            Self::Kioubit => "https://dn42.g-load.eu/.well-known/openid-configuration",
+            Self::IEdon => "https://auth.iedon.net/.well-known/openid-configuration",
+        }
+    }
+}
+
 /// Web 前端配置
 #[derive(Serialize, Deserialize, Clone)]
 pub struct WebConfig {
@@ -84,11 +107,18 @@ pub struct WebConfig {
     pub client_id: String,
     /// OAuth 客户端密钥
     pub client_secret: String,
-    /// OAuth Provider 发现地址
-    pub oauth_provider: String,
+    /// OAuth Provider
+    pub provider: OidcProvider,
     /// OAuth 回调地址
     pub redirect_uri: String,
     /// 前端源地址（用于 CORS）
     #[serde(default)]
     pub frontend_origin: Option<String>,
+}
+
+impl WebConfig {
+    /// 获取 OAuth Discovery URL
+    pub fn discovery_url(&self) -> &'static str {
+        self.provider.discovery_url()
+    }
 }

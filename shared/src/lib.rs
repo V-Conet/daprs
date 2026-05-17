@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod rate_limiter;
+pub mod validation;
 
 // 错误类型
 /// 应用程序统一错误类型
@@ -154,7 +155,7 @@ impl Default for FrontendConfig {
 /// Peering 配置请求
 ///
 /// 包含建立 WireGuard 隧道和 BGP 会话所需的所有信息。
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct PeeringPayload {
     /// 是否 MultiHop
     pub is_mhp: bool,
@@ -322,6 +323,43 @@ pub enum Cmd {
     BirdShow {
         /// 协议名称
         protocol: String,
+    },
+
+    /// TCP Ping 命令
+    ///
+    /// 使用 TCP 进行连通性测试
+    /// 用法: tcping <host> <port> [-c count] [-t timeout]
+    TcPing {
+        /// 协议版本 (4 或 6)
+        protocol: Option<u16>,
+        /// 目标地址
+        target: String,
+        /// 目标端口
+        port: u16,
+        /// 发送次数，默认 5
+        count: Option<u16>,
+        /// 超时时间（秒），默认 3
+        timeout: Option<u8>,
+    },
+
+    /// 查看路由表命令
+    ///
+    /// 用法: route <target> [-4|-6]
+    Route {
+        /// 协议版本 (4 或 6)
+        protocol: Option<u16>,
+        /// 目标地址（支持 CIDR）
+        target: String,
+    },
+
+    /// 显示 AS Path 命令
+    ///
+    /// 用法: path <target> [-4|-6]
+    Path {
+        /// 协议版本 (4 或 6)
+        protocol: Option<u16>,
+        /// 目标地址
+        target: String,
     },
 }
 
