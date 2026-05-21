@@ -13,6 +13,7 @@ const node = ref<NodeAgentConfig | null>(null)
 const loading = ref(true)
 const submitting = ref(false)
 const error = ref<string | null>(null)
+const success = ref<string | null>(null)
 const isModify = ref(false)
 const existingConfig = ref<PeerInfoResponse | null>(null)
 
@@ -84,6 +85,9 @@ const endpointV6 = computed(() => {
   }
   return null
 })
+
+// 节点是否需要验证
+const needsVerification = computed(() => node.value?.conf.is_verify === true)
 
 onMounted(async () => {
   try {
@@ -175,13 +179,21 @@ async function submitForm() {
         node: nodeName,
         payload
       })
+      success.value = 'Peering updated successfully!'
     } else {
       await createPeering({
         node: nodeName,
         payload
       })
+      if (needsVerification.value) {
+        success.value = 'Request submitted! Waiting for admin approval. You can check the status on the Dashboard.'
+      } else {
+        success.value = 'Peering created successfully!'
+      }
     }
-    router.push('/dashboard')
+    if (!needsVerification.value || isModify.value) {
+      setTimeout(() => router.push('/dashboard'), 1500)
+    }
   } catch (e: any) {
     error.value = e.response?.data?.error || `Failed to ${isModify.value ? 'modify' : 'create'} peering`
   } finally {
@@ -225,6 +237,20 @@ function goBack() {
               <strong>Your ASN:</strong> {{ authStore.asn }} |
               <strong>Target ASN:</strong> {{ node.conf.dn42.asn }}
               <span v-if="isModify" class="badge bg-success ms-2">Existing Peer</span>
+              <span v-else-if="needsVerification" class="badge bg-warning text-dark ms-2">Requires Approval</span>
+            </div>
+
+            <!-- 验证提示 -->
+            <div v-if="needsVerification && !isModify" class="alert alert-warning mb-3">
+              <i class="bi bi-exclamation-triangle me-2"></i>
+              <strong>Verification Required:</strong> Your peering request will be submitted for admin approval.
+              You can check the status on the Dashboard after submission.
+            </div>
+
+            <!-- 成功提示 -->
+            <div v-if="success" class="alert alert-success mb-3">
+              <i class="bi bi-check-circle me-2"></i>
+              {{ success }}
             </div>
 
             <!-- 现有配置提示 -->

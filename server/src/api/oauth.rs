@@ -93,6 +93,7 @@ pub async fn login_callback(
     let login_state = consume_login_state(&state, &state_value)?;
 
     let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| AppError::InternalError(format!("http client error: {e}")))?;

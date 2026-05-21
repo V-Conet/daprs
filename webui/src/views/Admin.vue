@@ -31,6 +31,9 @@ const deleteModal = ref(false)
 const deleteTarget = ref<{ node: string; asn: number } | null>(null)
 const deleteLoading = ref(false)
 
+// Expand details
+const expandedPeers = ref<Set<string>>(new Set())
+
 onMounted(async () => {
   try {
     const response = await checkAdmin()
@@ -131,6 +134,20 @@ function onTabChange(tab: 'pending' | 'peers') {
 // Check if node has error
 function isNodeError(peerList: PeerInfoResponse[]): boolean {
   return peerList.length === 1 && (peerList[0] as any).error
+}
+
+// Toggle peer details
+function togglePeerDetails(node: string, asn: number) {
+  const key = `${node}-${asn}`
+  if (expandedPeers.value.has(key)) {
+    expandedPeers.value.delete(key)
+  } else {
+    expandedPeers.value.add(key)
+  }
+}
+
+function isPeerExpanded(node: string, asn: number): boolean {
+  return expandedPeers.value.has(`${node}-${asn}`)
 }
 </script>
 
@@ -260,6 +277,7 @@ function isNodeError(peerList: PeerInfoResponse[]): boolean {
                   <table class="table table-hover mb-0">
                     <thead>
                       <tr>
+                        <th style="width: 40px"></th>
                         <th style="width: 120px">ASN</th>
                         <th style="width: 80px">Status</th>
                         <th>Endpoint</th>
@@ -270,49 +288,99 @@ function isNodeError(peerList: PeerInfoResponse[]): boolean {
                       </tr>
                     </thead>
                     <tbody>
-                      <tr v-for="(peerInfo, idx) in peerList" :key="idx">
-                        <template v-if="(peerInfo as any).error">
-                          <td colspan="7" class="text-warning small">
+                      <template v-for="(peerInfo, idx) in peerList" :key="idx">
+                        <tr v-if="(peerInfo as any).error">
+                          <td colspan="8" class="text-warning small">
                             AS{{ (peerInfo as any).asn }}: {{ (peerInfo as any).error }}
                           </td>
-                        </template>
+                        </tr>
                         <template v-else>
-                          <td>
-                            <span class="badge bg-info">AS{{ peerInfo.asn }}</span>
-                          </td>
-                          <td>
-                            <span :class="['badge', peerInfo.interface_up ? 'bg-success' : 'bg-secondary']">
-                              {{ peerInfo.interface_up ? 'Up' : 'Down' }}
-                            </span>
-                          </td>
-                          <td class="font-monospace small text-truncate" style="max-width: 200px">
-                            {{ peerInfo.wg?.endpoint || 'N/A' }}
-                          </td>
-                          <td class="font-monospace small">{{ peerInfo.wg?.peer_v4 || 'N/A' }}</td>
-                          <td class="font-monospace small text-truncate" style="max-width: 150px">
-                            {{ peerInfo.wg?.peer_v6 || 'N/A' }}
-                          </td>
-                          <td class="small">{{ peerInfo.bird?.session_type || 'N/A' }}</td>
-                          <td>
-                            <div class="btn-group btn-group-sm">
-                              <button
-                                @click="goToModify(nodeName, peerInfo.asn)"
-                                class="btn btn-outline-primary"
-                                title="Modify"
-                              >
-                                <i class="bi bi-pencil"></i>
-                              </button>
-                              <button
-                                @click="showDeleteModal(nodeName, peerInfo.asn)"
-                                class="btn btn-outline-danger"
-                                title="Delete"
-                              >
-                                <i class="bi bi-trash"></i>
-                              </button>
-                            </div>
-                          </td>
+                          <tr @click="togglePeerDetails(nodeName, peerInfo.asn)" style="cursor: pointer">
+                            <td>
+                              <i :class="['bi', isPeerExpanded(nodeName, peerInfo.asn) ? 'bi-chevron-down' : 'bi-chevron-right']"></i>
+                            </td>
+                            <td>
+                              <span class="badge bg-info">AS{{ peerInfo.asn }}</span>
+                            </td>
+                            <td>
+                              <span :class="['badge', peerInfo.interface_up ? 'bg-success' : 'bg-secondary']">
+                                {{ peerInfo.interface_up ? 'Up' : 'Down' }}
+                              </span>
+                            </td>
+                            <td class="font-monospace small text-truncate" style="max-width: 200px">
+                              {{ peerInfo.wg?.endpoint || 'N/A' }}
+                            </td>
+                            <td class="font-monospace small">{{ peerInfo.wg?.peer_v4 || 'N/A' }}</td>
+                            <td class="font-monospace small text-truncate" style="max-width: 150px">
+                              {{ peerInfo.wg?.peer_v6 || 'N/A' }}
+                            </td>
+                            <td class="small">{{ peerInfo.bird?.session_type || 'N/A' }}</td>
+                            <td @click.stop>
+                              <div class="btn-group btn-group-sm">
+                                <button
+                                  @click="goToModify(nodeName, peerInfo.asn)"
+                                  class="btn btn-outline-primary"
+                                  title="Modify"
+                                >
+                                  <i class="bi bi-pencil"></i>
+                                </button>
+                                <button
+                                  @click="showDeleteModal(nodeName, peerInfo.asn)"
+                                  class="btn btn-outline-danger"
+                                  title="Delete"
+                                >
+                                  <i class="bi bi-trash"></i>
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                          <!-- 展开的详细信息 -->
+                          <tr v-if="isPeerExpanded(nodeName, peerInfo.asn)">
+                            <td colspan="8" class="p-0">
+                              <div class="p-3 border-top" style="background: var(--bs-body-bg, #f8f9fa)">
+                                <div class="row g-3">
+                                  <!-- WireGuard 配置 -->
+                                  <div class="col-md-6">
+                                    <h6 class="text-body-secondary mb-2"><i class="bi bi-key me-1"></i>WireGuard</h6>
+                                    <dl class="row mb-0 small">
+                                      <dt class="col-4 text-body-secondary">Port</dt>
+                                      <dd class="col-8 font-monospace">{{ peerInfo.wg?.port || 'N/A' }}</dd>
+                                      <dt class="col-4 text-body-secondary">MTU</dt>
+                                      <dd class="col-8 font-monospace">{{ peerInfo.wg?.mtu || 1420 }}</dd>
+                                      <dt class="col-4 text-body-secondary">PubKey</dt>
+                                      <dd class="col-8 font-monospace text-break" style="font-size: 0.7rem">{{ peerInfo.wg?.pubkey || 'N/A' }}</dd>
+                                      <dt class="col-4 text-body-secondary">PSK</dt>
+                                      <dd class="col-8">{{ peerInfo.wg?.psk ? 'Set' : 'None' }}</dd>
+                                    </dl>
+                                  </div>
+                                  <!-- BGP 配置 -->
+                                  <div class="col-md-6">
+                                    <h6 class="text-body-secondary mb-2"><i class="bi bi-diagram-3 me-1"></i>BGP</h6>
+                                    <dl class="row mb-0 small">
+                                      <dt class="col-4 text-body-secondary">Session</dt>
+                                      <dd class="col-8">{{ peerInfo.bird?.session_type || 'N/A' }}</dd>
+                                      <dt class="col-4 text-body-secondary">MP-BGP</dt>
+                                      <dd class="col-8">{{ peerInfo.bird?.is_mhp ? 'Yes' : 'No' }}</dd>
+                                      <dt class="col-4 text-body-secondary">Ext NH</dt>
+                                      <dd class="col-8">{{ peerInfo.bird?.is_nhp ? 'Yes' : 'No' }}</dd>
+                                    </dl>
+                                  </div>
+                                  <!-- WG Show 输出 -->
+                                  <div v-if="peerInfo.interface_up && peerInfo.wg_show" class="col-12">
+                                    <h6 class="text-body-secondary mb-2"><i class="bi bi-terminal me-1"></i>wg show</h6>
+                                    <pre class="bg-dark text-light p-2 mb-0 small rounded" style="max-height: 150px; overflow-y: auto">{{ peerInfo.wg_show.output }}</pre>
+                                  </div>
+                                  <!-- BGP 输出 -->
+                                  <div v-if="peerInfo.bird_protocols?.length > 0" class="col-12">
+                                    <h6 class="text-body-secondary mb-2"><i class="bi bi-terminal me-1"></i>birdc show protocol</h6>
+                                    <pre class="bg-dark text-light p-2 mb-0 small rounded" style="max-height: 150px; overflow-y: auto">{{ peerInfo.bird_protocols.map((p: any) => p.output).join('\n\n') }}</pre>
+                                  </div>
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
                         </template>
-                      </tr>
+                      </template>
                     </tbody>
                   </table>
                 </div>

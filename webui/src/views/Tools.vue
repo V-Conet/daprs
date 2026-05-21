@@ -26,9 +26,6 @@ const tcpingCount = ref(5)
 const tcpingTimeout = ref(3)
 const tcpingProtocol = ref<number | null>(null)
 
-// Route/Path 参数
-const routeProtocol = ref<number | null>(null)
-
 // 目标地址
 const target = ref('')
 
@@ -119,8 +116,7 @@ async function executeCommand() {
         cmd = {
           op: 'route',
           args: {
-            target: target.value.trim(),
-            protocol: routeProtocol.value
+            target: target.value.trim()
           }
         }
         break
@@ -128,8 +124,7 @@ async function executeCommand() {
         cmd = {
           op: 'path',
           args: {
-            target: target.value.trim(),
-            protocol: routeProtocol.value
+            target: target.value.trim()
           }
         }
         break
@@ -287,15 +282,13 @@ function clearOutput() {
           </div>
         </div>
 
-        <!-- Route/Path 参数 -->
+        <!-- Route/Path 参数 - 不需要指定表 -->
         <div v-if="cmdType === 'route' || cmdType === 'path'" class="row g-3 mt-2 pt-3 border-top">
-          <div class="col-md-3">
-            <label class="form-label small">Protocol</label>
-            <select v-model="routeProtocol" class="form-select form-select-sm">
-              <option :value="null">Auto</option>
-              <option :value="4">IPv4</option>
-              <option :value="6">IPv6</option>
-            </select>
+          <div class="col-12">
+            <p class="text-muted small mb-0">
+              <i class="bi bi-info-circle me-1"></i>
+              BIRD will automatically select the correct routing table.
+            </p>
           </div>
         </div>
       </div>

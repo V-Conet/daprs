@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { getNodes, type NodeAgentConfig } from '../api'
+import { getNodes, getMyPendingRequests, type NodeAgentConfig, type PendingRequest } from '../api'
 
 const router = useRouter()
 const nodes = ref<Record<string, NodeAgentConfig>>({})
+const pendingRequests = ref<PendingRequest[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 
 onMounted(async () => {
   await loadNodes()
+  await loadPendingRequests()
 })
 
 async function loadNodes() {
@@ -28,6 +30,15 @@ async function loadNodes() {
     console.error(e)
   } finally {
     loading.value = false
+  }
+}
+
+async function loadPendingRequests() {
+  try {
+    const response = await getMyPendingRequests()
+    pendingRequests.value = response.data
+  } catch {
+    // Ignore errors for pending requests
   }
 }
 
@@ -58,6 +69,10 @@ function getRestrictions(node: NodeAgentConfig): string[] {
   }
   return restrictions
 }
+
+function formatTime(timestamp: number): string {
+  return new Date(timestamp * 1000).toLocaleString()
+}
 </script>
 
 <template>
@@ -73,6 +88,17 @@ function getRestrictions(node: NodeAgentConfig): string[] {
     <div v-if="error" class="alert alert-danger">
       {{ error }}
       <button @click="loadNodes" class="btn btn-sm btn-outline-danger ms-2">Retry</button>
+    </div>
+
+    <!-- 待处理请求 -->
+    <div v-if="pendingRequests.length > 0" class="alert alert-warning mb-4">
+      <h5 class="alert-heading"><i class="bi bi-clock-history me-2"></i>Pending Peering Requests</h5>
+      <p class="mb-2">Your requests are waiting for admin approval:</p>
+      <ul class="mb-0">
+        <li v-for="req in pendingRequests" :key="req.id">
+          <strong>{{ req.node }}</strong> - Submitted {{ formatTime(req.created_at) }}
+        </li>
+      </ul>
     </div>
 
     <!-- 加载中 -->

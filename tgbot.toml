@@ -1,0 +1,9 @@
+[tgbot]
+api_token = "TOKEN"
+superusers = [ 123456, 789012 ]
+# Bot token / proxy 需要在.env中设置
+
+[about]
+welcome = "WELCOME/START INFO, markdown format"
+# differs to superusers, this could even be a channel etc
+owner = "WHO TO AT"

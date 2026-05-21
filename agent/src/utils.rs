@@ -10,7 +10,7 @@ use axum::{
 };
 
 use crate::config::Config;
-use shared::{AppError, validation::validate_asn};
+use shared::AppError;
 
 /// 命令执行结果
 #[derive(Debug)]

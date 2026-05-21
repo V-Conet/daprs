@@ -167,7 +167,7 @@ async fn handle_traceroute(
 ) -> Result<String, AppError> {
     validate_target(&target)?;
 
-    let mut args: Vec<&str> = vec!["-q1", "-N32", "-w1"];
+    let mut args: Vec<&str> = vec!["-q1", "-w1"];
     match protocol {
         Some(4) => args.push("-4"),
         Some(6) => args.push("-6"),
@@ -236,69 +236,49 @@ async fn handle_tcping(
 
 async fn handle_route(
     cfg: &Config,
-    protocol: Option<u16>,
+    _protocol: Option<u16>,
     target: String,
 ) -> Result<String, AppError> {
     validate_target(&target)?;
 
-    let table = match protocol {
-        Some(4) => "master4",
-        Some(6) => "master6",
-        Some(_) => return Err(bad("invalid protocol")),
-        None => "master",
-    };
-
     exec_cmd(
         cfg,
         "birdc",
-        &[
-            "show", "route", "table", table, "for", &target, "all", "primary",
-        ],
+        &["show", "route", "for", &target, "all", "primary"],
     )
     .await
 }
 
 async fn handle_path(
     cfg: &Config,
-    protocol: Option<u16>,
+    _protocol: Option<u16>,
     target: String,
 ) -> Result<String, AppError> {
     validate_target(&target)?;
 
-    let table = match protocol {
-        Some(4) => "master4",
-        Some(6) => "master6",
-        Some(_) => return Err(bad("invalid protocol")),
-        None => "master",
-    };
-
     let output = run_cmd(
         cfg,
         "birdc",
-        &[
-            "show", "route", "table", table, "for", &target, "all", "primary",
-        ],
+        &["show", "route", "for", &target, "all", "primary"],
     )
     .await;
 
-    if !output.success && output.text.is_empty() {
-        return Err(bad("route lookup failed"));
-    }
-
-    let mut path_lines = Vec::new();
-    for line in output.text.lines() {
-        if line.contains("BGP.as_path:") {
-            if let Some(path) = line.split(':').nth(1) {
-                path_lines.push(path.trim());
+    if !output.text.is_empty() {
+        let mut path_lines = Vec::new();
+        for line in output.text.lines() {
+            if line.contains("bgp_path:") {
+                if let Some(path) = line.split(':').nth(1) {
+                    path_lines.push(path.trim());
+                }
             }
+        }
+
+        if !path_lines.is_empty() {
+            return Ok(path_lines.join("\n"));
         }
     }
 
-    if path_lines.is_empty() {
-        Ok("No AS path found".into())
-    } else {
-        Ok(path_lines.join("\n"))
-    }
+    Ok("No AS path found".into())
 }
 
 async fn exec_cmd(cfg: &Config, bin: &str, args: &[&str]) -> Result<String, AppError> {

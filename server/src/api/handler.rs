@@ -24,6 +24,7 @@ const PEERING_QUEUE: &str = "peering_queue";
 const MODIFY_QUEUE: &str = "modify_queue";
 const REMOVE_QUEUE: &str = "remove_queue";
 const PENDING_QUEUE: &str = "pending_queue";
+const PENDING_TTL_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
 
 // 节点管理
 /// 获取所有节点列表
@@ -242,13 +243,23 @@ pub async fn post_cmd(
         .json(&action.payload)
         .send()
         .await
-        .map_err(|_| AppError::BadGateway)?;
+        .map_err(|e| {
+            tracing::error!("cmd request failed: {e}");
+            AppError::BadGateway
+        })?;
 
     if !resp.status().is_success() {
-        return Err(AppError::BadGateway);
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        tracing::error!("agent cmd returned {status}: {body}");
+        let msg = sanitize_agent_error(&body);
+        return Err(AppError::BadRequest(format!("agent error: {msg}")));
     }
 
-    resp.text().await.map_err(|_| AppError::BadGateway)
+    resp.text().await.map_err(|e| {
+        tracing::error!("failed to read cmd response: {e}");
+        AppError::BadGateway
+    })
 }
 
 /// 查询 Peer 信息
@@ -278,13 +289,23 @@ pub async fn get_peer_info(
         .header("asn", asn.to_string())
         .send()
         .await
-        .map_err(|_| AppError::BadGateway)?;
+        .map_err(|e| {
+            tracing::error!("peer_info request failed: {e}");
+            AppError::BadGateway
+        })?;
 
     if !resp.status().is_success() {
-        return Err(AppError::BadGateway);
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        tracing::error!("agent peer_info returned {status}: {body}");
+        let msg = sanitize_agent_error(&body);
+        return Err(AppError::BadRequest(format!("agent error: {msg}")));
     }
 
-    let json: serde_json::Value = resp.json().await.map_err(|_| AppError::BadGateway)?;
+    let json: serde_json::Value = resp.json().await.map_err(|e| {
+        tracing::error!("failed to parse peer_info response: {e}");
+        AppError::BadGateway
+    })?;
     Ok(Json(json))
 }
 
@@ -316,11 +337,86 @@ async fn dispatch_to_agent(
         req = req.json(b);
     }
 
-    let resp = req.send().await.map_err(|_| AppError::BadGateway)?;
+    let resp = req.send().await.map_err(|e| {
+        tracing::error!("agent request failed: {e}");
+        AppError::BadGateway
+    })?;
+
     if !resp.status().is_success() {
-        return Err(AppError::BadGateway);
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        tracing::error!("agent returned {status}: {body}");
+        let msg = sanitize_agent_error(&body);
+        return Err(AppError::BadRequest(format!("agent error: {msg}")));
     }
     Ok(())
+}
+
+/// 移除 Agent 错误信息
+///
+/// 移除可能的敏感信息：
+/// - 公网 IP 地址
+/// - 文件系统路径
+/// - WireGuard 密钥
+fn sanitize_agent_error(error: &str) -> String {
+    let error = error.trim();
+    if error.is_empty() {
+        return "unknown error".into();
+    }
+
+    // 尝试从 JSON 提取错误消息
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(error) {
+        if let Some(msg) = json.get("error").and_then(|v| v.as_str()) {
+            return sanitize_sensitive_info(msg);
+        }
+    }
+
+    sanitize_sensitive_info(error)
+}
+
+/// 移除敏感信息
+fn sanitize_sensitive_info(text: &str) -> String {
+    let mut result = text.to_string();
+
+    // 隐藏公网 IPv4 (非 DN42 范围)
+    let ipv4_re = regex::Regex::new(r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap();
+    result = ipv4_re.replace_all(&result, |caps: &regex::Captures| {
+        let ip = &caps[0];
+        // DN42 范围: 172.20.0.0/14, 10.0.0.0/8 (部分)
+        if ip.starts_with("172.2") || ip.starts_with("10.") {
+            ip.to_string()
+        } else {
+            "[REDACTED]".to_string()
+        }
+    }).to_string();
+
+    // 隐藏公网 IPv6 (非 DN42/ULA 范围)
+    let ipv6_re = regex::Regex::new(r"\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b").unwrap();
+    result = ipv6_re.replace_all(&result, |caps: &regex::Captures| {
+        let ip = &caps[0];
+        // DN42 ULA: fd00::/8, Link-local: fe80::/10
+        if ip.starts_with("fd") || ip.starts_with("fe80") {
+            ip.to_string()
+        } else {
+            "[REDACTED]".to_string()
+        }
+    }).to_string();
+
+    // 隐藏文件路径
+    let path_re = regex::Regex::new(r"/[\w/.-]+").unwrap();
+    result = path_re.replace_all(&result, "[PATH]").to_string();
+
+    // 隐藏 WireGuard 密钥 (44字符 base64)
+    let key_re = regex::Regex::new(r"\b[A-Za-z0-9+/]{42,44}=\b").unwrap();
+    result = key_re.replace_all(&result, "[KEY]").to_string();
+
+    // 限制长度
+    if result.len() > 300 {
+        result.truncate(300);
+        result.push_str("...");
+    }
+
+    result
 }
 
 /// 获取 Agent 配置
@@ -414,6 +510,24 @@ pub struct PendingRequest {
     pub payload: PeeringPayload,
     /// 创建时间
     pub created_at: u64,
+}
+
+/// 获取用户的待处理请求
+pub async fn get_my_pending_requests(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<PendingRequest>>, AppError> {
+    let session = require_session(&state, &headers)?;
+    let asn = get_session_asn(&session);
+
+    let mut requests = read_all_from_queue::<PendingRequest>(&state.db, PENDING_QUEUE)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    requests.retain(|r| r.asn == asn && now - r.created_at < PENDING_TTL_SECS);
+    Ok(Json(requests))
 }
 
 /// 获取待审核请求列表

@@ -192,3 +192,6 @@ export const rejectRequest = (id: string) => api.post(`/admin/pending/${id}/reje
 export const getAllPeers = () => api.get<Record<string, PeerInfoResponse[]>>('/admin/peers')
 export const adminModifyPeer = (data: AdminPeerRequest) => api.post('/admin/peer/modify', data)
 export const adminDeletePeer = (data: AdminDeleteRequest) => api.post('/admin/peer/delete', data)
+
+// 用户待处理请求
+export const getMyPendingRequests = () => api.get<PendingRequest[]>('/pending')

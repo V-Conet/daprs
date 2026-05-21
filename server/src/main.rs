@@ -113,6 +113,8 @@ async fn run() -> Result<()> {
         .route("/api/remove/{node}", delete(handler::delete_remove_queue))
         .route("/api/cmd", post(handler::post_cmd))
         .route("/api/peer/{node}/info", get(handler::get_peer_info))
+        // 用户待处理请求
+        .route("/api/pending", get(handler::get_my_pending_requests))
         // 管理员 API
         .route("/api/admin/pending", get(handler::get_pending_requests))
         .route(
