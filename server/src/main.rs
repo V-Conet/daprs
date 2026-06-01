@@ -19,36 +19,9 @@ use crate::config::{AppState, Config};
 use shared::rate_limiter::{self, RateLimiter};
 
 mod api;
+mod audit;
 mod cli;
 mod config;
-
-// const INDEX_HTML: &str = r#"
-// <!DOCTYPE html>
-// <html>
-// <head>
-//     <title>DAPRS API</title>
-//     <style>
-//         body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
-//         h1 { color: #333; }
-//         a { color: #0066cc; text-decoration: none; }
-//         a:hover { text-decoration: underline; }
-//         ul { list-style: none; padding: 0; }
-//         li { margin: 0.5rem 0; }
-//     </style>
-// </head>
-// <body>
-//     <h1>DAPRS API</h1>
-//     <p>DN42 AutoPeering System</p>
-//     <ul>
-//         <li><a href="/api/login">Login</a></li>
-//         <li><a href="/api/logout">Logout</a></li>
-//         <li><a href="/api/me">My Info</a></li>
-//         <li><a href="/api/nodes">View Nodes</a></li>
-//         <li><a href="/api/peers">View Peers</a></li>
-//     </ul>
-// </body>
-// </html>
-// "#;
 
 #[tokio::main]
 async fn main() {
@@ -129,6 +102,7 @@ async fn run() -> Result<()> {
         .route("/api/admin/peer/modify", post(handler::admin_modify_peer))
         .route("/api/admin/peer/delete", post(handler::admin_delete_peer))
         .route("/api/admin/check", get(handler::check_admin))
+        .route("/api/admin/audit", get(handler::get_audit_logs))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             oauth::require_auth_middleware,

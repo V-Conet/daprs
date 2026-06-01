@@ -9,3 +9,5 @@
 /wg
 /bird
 /tmp
+/.env
+/tgbot.toml

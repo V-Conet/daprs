@@ -1,0 +1,17 @@
+# DAPRS TgBot Configuration Example
+
+[tgbot]
+# Agent API Token (same as server config)
+api_token = "YOUR_API_TOKEN"
+# Command timeout in seconds
+timeout = 30
+
+# Bot token is read from TELOXIDE_TOKEN environment variable
+
+[[agent.nodes]]
+name = "node1"
+address = "http://127.0.0.1:9813"
+
+[[agent.nodes]]
+name = "node2"
+address = "http://192.168.1.100:9813"

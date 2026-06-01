@@ -8,15 +8,17 @@ import {
   rejectRequest,
   getAllPeers,
   adminDeletePeer,
+  getAuditLogs,
   type PendingRequest,
-  type PeerInfoResponse
+  type PeerInfoResponse,
+  type AuditLog
 } from '../api'
 
 const router = useRouter()
 
 const isAdmin = ref(false)
 const loading = ref(true)
-const activeTab = ref<'pending' | 'peers'>('pending')
+const activeTab = ref<'pending' | 'peers' | 'audit'>('pending')
 
 // Pending requests
 const pendingRequests = ref<PendingRequest[]>([])
@@ -25,6 +27,10 @@ const pendingLoading = ref(false)
 // All peers
 const allPeers = ref<Record<string, PeerInfoResponse[]>>({})
 const peersLoading = ref(false)
+
+// Audit logs
+const auditLogs = ref<AuditLog[]>([])
+const auditLoading = ref(false)
 
 // Delete confirmation
 const deleteModal = ref(false)
@@ -71,6 +77,18 @@ async function loadAllPeers() {
     console.error('Failed to load all peers:', e)
   } finally {
     peersLoading.value = false
+  }
+}
+
+async function loadAuditLogs() {
+  auditLoading.value = true
+  try {
+    const response = await getAuditLogs()
+    auditLogs.value = response.data
+  } catch (e) {
+    console.error('Failed to load audit logs:', e)
+  } finally {
+    auditLoading.value = false
   }
 }
 
@@ -124,10 +142,13 @@ function formatTime(timestamp: number): string {
 const totalPending = computed(() => pendingRequests.value.length)
 
 // Watch tab changes
-function onTabChange(tab: 'pending' | 'peers') {
+function onTabChange(tab: 'pending' | 'peers' | 'audit') {
   activeTab.value = tab
   if (tab === 'peers' && Object.keys(allPeers.value).length === 0) {
     loadAllPeers()
+  }
+  if (tab === 'audit' && auditLogs.value.length === 0) {
+    loadAuditLogs()
   }
 }
 
@@ -148,6 +169,36 @@ function togglePeerDetails(node: string, asn: number) {
 
 function isPeerExpanded(node: string, asn: number): boolean {
   return expandedPeers.value.has(`${node}-${asn}`)
+}
+
+function getActionLabel(action: string): string {
+  const labels: Record<string, string> = {
+    create: 'Create',
+    approve: 'Approve',
+    reject: 'Reject',
+    modify: 'Modify',
+    delete: 'Delete'
+  }
+  return labels[action] || action
+}
+
+function getActionBadgeClass(action: string): string {
+  const classes: Record<string, string> = {
+    create: 'bg-primary',
+    approve: 'bg-success',
+    reject: 'bg-danger',
+    modify: 'bg-warning text-dark',
+    delete: 'bg-secondary'
+  }
+  return classes[action] || 'bg-secondary'
+}
+
+function isSuccess(result: AuditLog['result']): boolean {
+  return result === 'success'
+}
+
+function getErrorMessage(result: AuditLog['result']): string {
+  return result === 'success' ? '' : result
 }
 </script>
 
@@ -188,6 +239,16 @@ function isPeerExpanded(node: string, asn: number): boolean {
           >
             <i class="bi bi-diagram-3 me-1"></i>
             All Peers
+          </button>
+        </li>
+        <li class="nav-item">
+          <button
+            class="nav-link"
+            :class="{ active: activeTab === 'audit' }"
+            @click="onTabChange('audit')"
+          >
+            <i class="bi bi-clock-history me-1"></i>
+            Recent Operations
           </button>
         </li>
       </ul>
@@ -368,12 +429,12 @@ function isPeerExpanded(node: string, asn: number): boolean {
                                   <!-- WG Show 输出 -->
                                   <div v-if="peerInfo.interface_up && peerInfo.wg_show" class="col-12">
                                     <h6 class="text-body-secondary mb-2"><i class="bi bi-terminal me-1"></i>wg show</h6>
-                                    <pre class="bg-dark text-light p-2 mb-0 small rounded" style="max-height: 150px; overflow-y: auto">{{ peerInfo.wg_show.output }}</pre>
+                                    <pre class="bg-body-tertiary p-2 mb-0 small rounded border" style="max-height: 150px; overflow-y: auto">{{ peerInfo.wg_show.output }}</pre>
                                   </div>
                                   <!-- BGP 输出 -->
                                   <div v-if="peerInfo.bird_protocols?.length > 0" class="col-12">
                                     <h6 class="text-body-secondary mb-2"><i class="bi bi-terminal me-1"></i>birdc show protocol</h6>
-                                    <pre class="bg-dark text-light p-2 mb-0 small rounded" style="max-height: 150px; overflow-y: auto">{{ peerInfo.bird_protocols.map((p: any) => p.output).join('\n\n') }}</pre>
+                                    <pre class="bg-body-tertiary p-2 mb-0 small rounded border" style="max-height: 150px; overflow-y: auto">{{ peerInfo.bird_protocols.map((p: any) => p.output).join('\n\n') }}</pre>
                                   </div>
                                 </div>
                               </div>
@@ -392,6 +453,64 @@ function isPeerExpanded(node: string, asn: number): boolean {
         <div v-if="Object.keys(allPeers).length === 0" class="text-center py-5 text-muted">
           <i class="bi bi-inbox display-4"></i>
           <p class="mt-3">No nodes found</p>
+        </div>
+      </div>
+
+      <!-- Audit Log Tab -->
+      <div v-if="activeTab === 'audit'">
+        <div class="d-flex justify-content-end mb-3">
+          <button @click="loadAuditLogs" class="btn btn-outline-primary btn-sm" :disabled="auditLoading">
+            <i class="bi bi-arrow-clockwise me-1"></i> Refresh
+          </button>
+        </div>
+
+        <div v-if="auditLoading" class="text-center py-4">
+          <div class="spinner-border spinner-border-sm"></div>
+        </div>
+
+        <div v-else-if="auditLogs.length === 0" class="text-center py-5 text-muted">
+          <i class="bi bi-journal-text display-4"></i>
+          <p class="mt-3">No operations recorded</p>
+        </div>
+
+        <div v-else class="table-responsive">
+          <table class="table table-hover">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Actor ASN</th>
+                <th>Action</th>
+                <th>Target ASN</th>
+                <th>Node</th>
+                <th>Result</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="log in auditLogs" :key="log.id">
+                <td class="small text-muted">{{ formatTime(log.timestamp) }}</td>
+                <td>
+                  <span class="badge bg-secondary">AS{{ log.actor_asn }}</span>
+                </td>
+                <td>
+                  <span :class="['badge', getActionBadgeClass(log.action)]">
+                    {{ getActionLabel(log.action) }}
+                  </span>
+                </td>
+                <td>
+                  <span class="badge bg-info">AS{{ log.target_asn }}</span>
+                </td>
+                <td>{{ log.node }}</td>
+                <td>
+                  <span v-if="isSuccess(log.result)" class="badge bg-success">
+                    <i class="bi bi-check-lg"></i> Success
+                  </span>
+                  <span v-else class="badge bg-danger" :title="getErrorMessage(log.result)">
+                    <i class="bi bi-x-lg"></i> Failed
+                  </span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
     </template>

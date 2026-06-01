@@ -1,0 +1,29 @@
+import { defineConfig } from 'vite'
+import type { Plugin } from 'vite'
+import vue from '@vitejs/plugin-vue'
+
+function injectUmami(): Plugin {
+  return {
+    name: 'inject-umami',
+    transformIndexHtml(html) {
+      return html.replace(
+        '</head>',
+        `  <script defer src="UMAMI_URL" data-website-id="SITE_ID"></script>\n  </head>`
+      )
+    }
+  }
+}
+
+// https://vite.dev/config/
+export default defineConfig({
+  plugins: [vue(), injectUmami()],
+  server: {
+    port: 5173,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8080',
+        changeOrigin: true
+      }
+    }
+  }
+})

@@ -404,9 +404,8 @@ fn gen_bird_protocol(
 /// 写入 WireGuard 配置文件
 fn write_wg(cfg: &Config, asn: u32, conf: &str) -> Result<(), AppError> {
     let path = format!("{}/dn42-{}.conf", cfg.agent.wg_path, asn);
-    std::fs::write(&path, conf).map_err(|e| {
-        AppError::InternalError(format!("failed to write wg config: {e}"))
-    })
+    std::fs::write(&path, conf)
+        .map_err(|e| AppError::InternalError(format!("failed to write wg config: {e}")))
 }
 
 /// 写入 Bird 配置文件
@@ -416,9 +415,8 @@ fn write_bird(cfg: &Config, asn: u32, conf: &str) -> Result<(), AppError> {
         .map_err(|e| AppError::InternalError(format!("failed to create bird peers dir: {e}")))?;
 
     let path = format!("{}/{}.conf", dir, asn);
-    std::fs::write(&path, conf).map_err(|e| {
-        AppError::InternalError(format!("failed to write bird config: {e}"))
-    })
+    std::fs::write(&path, conf)
+        .map_err(|e| AppError::InternalError(format!("failed to write bird config: {e}")))
 }
 
 /// 删除 WireGuard 配置文件
@@ -461,11 +459,11 @@ async fn run_wg_quick_down(cfg: &Config, asn: u32) {
 async fn run_birdc_configure(cfg: &Config) {
     for _ in 1..=3 {
         let result = run_cmd(cfg, "birdc", &["configure"]).await;
-        
+
         if result.success {
             return;
         }
-        
+
         sleep(Duration::from_millis(200)).await;
         eprintln!("birdc configure failed after 3 attempts: {}", result.text);
     }
@@ -589,20 +587,21 @@ fn parse_bird_config(path: &str) -> Result<BirdConfig, AppError> {
             .any(|l| l.contains("ipv4 {"));
 
     // 确定配置类型
-    let (is_mhp, is_nhp, session_type) = match (has_v6_session, has_v4_session, v6_blocks_v4, v4_blocks_v6) {
-        // 只有 v6 会话，block 了 v4 -> MP-BGP over IPv6 (ENH)
-        (true, false, true, false) => (true, true, "MP-BGP over IPv6 (ENH)".into()),
-        // 只有 v4 会话，block 了 v6 -> MP-BGP over IPv4
-        (false, true, false, true) => (true, false, "MP-BGP over IPv4".into()),
-        // 两个会话都有，各自 block 对方 -> Dual Sessions
-        (true, true, true, true) => (false, false, "Dual BGP Sessions".into()),
-        // 只有 v6 会话，无 block -> IPv6 Only
-        (true, false, false, false) => (false, false, "IPv6 Only".into()),
-        // 只有 v4 会话，无 block -> IPv4 Only
-        (false, true, false, false) => (false, false, "IPv4 Only".into()),
-        // 其他情况
-        _ => (false, false, "Unknown".into()),
-    };
+    let (is_mhp, is_nhp, session_type) =
+        match (has_v6_session, has_v4_session, v6_blocks_v4, v4_blocks_v6) {
+            // 只有 v6 会话，block 了 v4 -> MP-BGP over IPv6 (ENH)
+            (true, false, true, false) => (true, true, "MP-BGP over IPv6 (ENH)".into()),
+            // 只有 v4 会话，block 了 v6 -> MP-BGP over IPv4
+            (false, true, false, true) => (true, false, "MP-BGP over IPv4".into()),
+            // 两个会话都有，各自 block 对方 -> Dual Sessions
+            (true, true, true, true) => (false, false, "Dual BGP Sessions".into()),
+            // 只有 v6 会话，无 block -> IPv6 Only
+            (true, false, false, false) => (false, false, "IPv6 Only".into()),
+            // 只有 v4 会话，无 block -> IPv4 Only
+            (false, true, false, false) => (false, false, "IPv4 Only".into()),
+            // 其他情况
+            _ => (false, false, "Unknown".into()),
+        };
 
     Ok(BirdConfig {
         is_mhp,

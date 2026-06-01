@@ -17,6 +17,7 @@ use shared::{
 use crate::{
     api::oauth::{get_session_asn, is_session_admin, persist_json, require_admin, require_session},
     api::{FrontendAgentConfig, NodeAgentConfig},
+    audit,
     config::AppState,
 };
 
@@ -95,12 +96,20 @@ pub async fn post_peering(
                 .as_secs(),
         };
         persist_json(&state.db, PENDING_QUEUE, &request_id, &pending)?;
+        audit::log_operation(
+            &state.db,
+            asn,
+            shared::ActionType::Create,
+            asn,
+            &action.node,
+            shared::ActionResult::Success,
+        )?;
         return Ok(StatusCode::ACCEPTED);
     }
 
     persist_json(&state.db, PEERING_QUEUE, &action.node, &action)?;
 
-    dispatch_to_agent(
+    let result = dispatch_to_agent(
         &state,
         &action.node,
         reqwest::Method::POST,
@@ -108,8 +117,32 @@ pub async fn post_peering(
         Some(&action.payload),
         asn,
     )
-    .await?;
+    .await;
 
+    match &result {
+        Ok(_) => {
+            audit::log_operation(
+                &state.db,
+                asn,
+                shared::ActionType::Create,
+                asn,
+                &action.node,
+                shared::ActionResult::Success,
+            )?;
+        }
+        Err(e) => {
+            let _ = audit::log_operation(
+                &state.db,
+                asn,
+                shared::ActionType::Create,
+                asn,
+                &action.node,
+                shared::ActionResult::Failed(e.to_string()),
+            );
+        }
+    }
+
+    result?;
     Ok(StatusCode::CREATED)
 }
 
@@ -126,7 +159,7 @@ pub async fn post_modify(
 
     persist_json(&state.db, MODIFY_QUEUE, &action.node, &action)?;
 
-    dispatch_to_agent(
+    let result = dispatch_to_agent(
         &state,
         &action.node,
         reqwest::Method::POST,
@@ -134,8 +167,32 @@ pub async fn post_modify(
         Some(&action.payload),
         asn,
     )
-    .await?;
+    .await;
 
+    match &result {
+        Ok(_) => {
+            audit::log_operation(
+                &state.db,
+                asn,
+                shared::ActionType::Modify,
+                asn,
+                &action.node,
+                shared::ActionResult::Success,
+            )?;
+        }
+        Err(e) => {
+            let _ = audit::log_operation(
+                &state.db,
+                asn,
+                shared::ActionType::Modify,
+                asn,
+                &action.node,
+                shared::ActionResult::Failed(e.to_string()),
+            );
+        }
+    }
+
+    result?;
     Ok(StatusCode::OK)
 }
 
@@ -152,7 +209,7 @@ pub async fn post_remove(
 
     persist_json(&state.db, REMOVE_QUEUE, &req.node, &req)?;
 
-    if let Err(e) = dispatch_to_agent(
+    let result = dispatch_to_agent(
         &state,
         &req.node,
         reqwest::Method::DELETE,
@@ -160,18 +217,35 @@ pub async fn post_remove(
         None,
         asn,
     )
-    .await
-    {
-        eprintln!(
-            "dispatch_to_agent(delete_peer) failed for {}: {:?}",
-            req.node, e
-        );
+    .await;
+
+    match &result {
+        Ok(_) => {
+            let _ = remove_from_queue(&state.db, PEERING_QUEUE, &req.node);
+            let _ = remove_from_queue(&state.db, MODIFY_QUEUE, &req.node);
+            let _ = remove_from_queue(&state.db, REMOVE_QUEUE, &req.node);
+            let _ = audit::log_operation(
+                &state.db,
+                asn,
+                shared::ActionType::Delete,
+                asn,
+                &req.node,
+                shared::ActionResult::Success,
+            );
+        }
+        Err(e) => {
+            let _ = audit::log_operation(
+                &state.db,
+                asn,
+                shared::ActionType::Delete,
+                asn,
+                &req.node,
+                shared::ActionResult::Failed(e.to_string()),
+            );
+        }
     }
 
-    let _ = remove_from_queue(&state.db, PEERING_QUEUE, &req.node);
-    let _ = remove_from_queue(&state.db, MODIFY_QUEUE, &req.node);
-    let _ = remove_from_queue(&state.db, REMOVE_QUEUE, &req.node);
-
+    result?;
     Ok(StatusCode::OK)
 }
 
@@ -380,27 +454,31 @@ fn sanitize_sensitive_info(text: &str) -> String {
 
     // 隐藏公网 IPv4 (非 DN42 范围)
     let ipv4_re = regex::Regex::new(r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap();
-    result = ipv4_re.replace_all(&result, |caps: &regex::Captures| {
-        let ip = &caps[0];
-        // DN42 范围: 172.20.0.0/14, 10.0.0.0/8 (部分)
-        if ip.starts_with("172.2") || ip.starts_with("10.") {
-            ip.to_string()
-        } else {
-            "[REDACTED]".to_string()
-        }
-    }).to_string();
+    result = ipv4_re
+        .replace_all(&result, |caps: &regex::Captures| {
+            let ip = &caps[0];
+            // DN42 范围: 172.20.0.0/14, 10.0.0.0/8 (部分)
+            if ip.starts_with("172.2") || ip.starts_with("10.") {
+                ip.to_string()
+            } else {
+                "[REDACTED]".to_string()
+            }
+        })
+        .to_string();
 
     // 隐藏公网 IPv6 (非 DN42/ULA 范围)
     let ipv6_re = regex::Regex::new(r"\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b").unwrap();
-    result = ipv6_re.replace_all(&result, |caps: &regex::Captures| {
-        let ip = &caps[0];
-        // DN42 ULA: fd00::/8, Link-local: fe80::/10
-        if ip.starts_with("fd") || ip.starts_with("fe80") {
-            ip.to_string()
-        } else {
-            "[REDACTED]".to_string()
-        }
-    }).to_string();
+    result = ipv6_re
+        .replace_all(&result, |caps: &regex::Captures| {
+            let ip = &caps[0];
+            // DN42 ULA: fd00::/8, Link-local: fe80::/10
+            if ip.starts_with("fd") || ip.starts_with("fe80") {
+                ip.to_string()
+            } else {
+                "[REDACTED]".to_string()
+            }
+        })
+        .to_string();
 
     // 隐藏文件路径
     let path_re = regex::Regex::new(r"/[\w/.-]+").unwrap();
@@ -546,14 +624,15 @@ pub async fn approve_request(
     headers: HeaderMap,
     Path(request_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let _session = require_admin(&state, &headers)?;
+    let session = require_admin(&state, &headers)?;
+    let actor_asn = get_session_asn(&session);
 
     let pending = get_pending_request(&state.db, &request_id)?
         .ok_or(AppError::BadRequest("request not found".into()))?;
 
     validate_asn(pending.asn).map_err(|e| AppError::BadRequest(e.into()))?;
 
-    dispatch_to_agent(
+    let result = dispatch_to_agent(
         &state,
         &pending.node,
         reqwest::Method::POST,
@@ -561,9 +640,33 @@ pub async fn approve_request(
         Some(&pending.payload),
         pending.asn,
     )
-    .await?;
+    .await;
 
-    remove_from_queue(&state.db, PENDING_QUEUE, &request_id)?;
+    match &result {
+        Ok(_) => {
+            remove_from_queue(&state.db, PENDING_QUEUE, &request_id)?;
+            audit::log_operation(
+                &state.db,
+                actor_asn,
+                shared::ActionType::Approve,
+                pending.asn,
+                &pending.node,
+                shared::ActionResult::Success,
+            )?;
+        }
+        Err(e) => {
+            let _ = audit::log_operation(
+                &state.db,
+                actor_asn,
+                shared::ActionType::Approve,
+                pending.asn,
+                &pending.node,
+                shared::ActionResult::Failed(e.to_string()),
+            );
+        }
+    }
+
+    result?;
     Ok(StatusCode::OK)
 }
 
@@ -573,8 +676,23 @@ pub async fn reject_request(
     headers: HeaderMap,
     Path(request_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let _session = require_admin(&state, &headers)?;
+    let session = require_admin(&state, &headers)?;
+    let actor_asn = get_session_asn(&session);
+
+    let pending = get_pending_request(&state.db, &request_id)?
+        .ok_or(AppError::BadRequest("request not found".into()))?;
+
     remove_from_queue(&state.db, PENDING_QUEUE, &request_id)?;
+
+    audit::log_operation(
+        &state.db,
+        actor_asn,
+        shared::ActionType::Reject,
+        pending.asn,
+        &pending.node,
+        shared::ActionResult::Success,
+    )?;
+
     Ok(StatusCode::OK)
 }
 
@@ -645,12 +763,12 @@ pub async fn admin_modify_peer(
     headers: HeaderMap,
     Json(req): Json<AdminPeerRequest>,
 ) -> Result<StatusCode, AppError> {
-    let _session = require_admin(&state, &headers)?;
+    let session = require_admin(&state, &headers)?;
+    let actor_asn = get_session_asn(&session);
 
-    // 验证 ASN
     validate_asn(req.asn).map_err(|e| AppError::BadRequest(e.into()))?;
 
-    dispatch_to_agent(
+    let result = dispatch_to_agent(
         &state,
         &req.node,
         reqwest::Method::POST,
@@ -658,8 +776,32 @@ pub async fn admin_modify_peer(
         Some(&req.payload),
         req.asn,
     )
-    .await?;
+    .await;
 
+    match &result {
+        Ok(_) => {
+            audit::log_operation(
+                &state.db,
+                actor_asn,
+                shared::ActionType::Modify,
+                req.asn,
+                &req.node,
+                shared::ActionResult::Success,
+            )?;
+        }
+        Err(e) => {
+            let _ = audit::log_operation(
+                &state.db,
+                actor_asn,
+                shared::ActionType::Modify,
+                req.asn,
+                &req.node,
+                shared::ActionResult::Failed(e.to_string()),
+            );
+        }
+    }
+
+    result?;
     Ok(StatusCode::OK)
 }
 
@@ -669,12 +811,12 @@ pub async fn admin_delete_peer(
     headers: HeaderMap,
     Json(req): Json<AdminDeleteRequest>,
 ) -> Result<StatusCode, AppError> {
-    let _session = require_admin(&state, &headers)?;
+    let session = require_admin(&state, &headers)?;
+    let actor_asn = get_session_asn(&session);
 
-    // 验证 ASN
     validate_asn(req.asn).map_err(|e| AppError::BadRequest(e.into()))?;
 
-    dispatch_to_agent(
+    let result = dispatch_to_agent(
         &state,
         &req.node,
         reqwest::Method::DELETE,
@@ -682,8 +824,32 @@ pub async fn admin_delete_peer(
         None,
         req.asn,
     )
-    .await?;
+    .await;
 
+    match &result {
+        Ok(_) => {
+            audit::log_operation(
+                &state.db,
+                actor_asn,
+                shared::ActionType::Delete,
+                req.asn,
+                &req.node,
+                shared::ActionResult::Success,
+            )?;
+        }
+        Err(e) => {
+            let _ = audit::log_operation(
+                &state.db,
+                actor_asn,
+                shared::ActionType::Delete,
+                req.asn,
+                &req.node,
+                shared::ActionResult::Failed(e.to_string()),
+            );
+        }
+    }
+
+    result?;
     Ok(StatusCode::OK)
 }
 
@@ -725,4 +891,13 @@ pub async fn check_admin(
 ) -> Result<Json<bool>, AppError> {
     let session = require_session(&state, &headers)?;
     Ok(Json(is_session_admin(&session)))
+}
+
+pub async fn get_audit_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<shared::AuditLog>>, AppError> {
+    let _session = require_admin(&state, &headers)?;
+    let logs = audit::get_all_logs(&state.db)?;
+    Ok(Json(logs))
 }

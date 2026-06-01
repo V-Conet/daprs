@@ -449,3 +449,41 @@ pub struct PeerInfoResponse {
     /// Bird 配置详情
     pub bird: Option<BirdConfig>,
 }
+
+/// 操作类型
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ActionType {
+    Create,
+    Approve,
+    Reject,
+    Modify,
+    Delete,
+}
+
+/// 操作结果
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum ActionResult {
+    Success,
+    Failed(String),
+}
+
+/// 审计日志条目
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AuditLog {
+    /// 日志 ID
+    pub id: String,
+    /// 时间戳（Unix 时间）
+    pub timestamp: u64,
+    /// 操作者 ASN
+    pub actor_asn: u32,
+    /// 操作类型
+    pub action: ActionType,
+    /// 目标 ASN
+    pub target_asn: u32,
+    /// 节点名称
+    pub node: String,
+    /// 操作结果
+    pub result: ActionResult,
+}

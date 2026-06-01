@@ -195,3 +195,19 @@ export const adminDeletePeer = (data: AdminDeleteRequest) => api.post('/admin/pe
 
 // 用户待处理请求
 export const getMyPendingRequests = () => api.get<PendingRequest[]>('/pending')
+
+// ============================================================================
+// Audit Log API
+// ============================================================================
+
+export interface AuditLog {
+  id: string
+  timestamp: number
+  actor_asn: number
+  action: 'create' | 'approve' | 'reject' | 'modify' | 'delete'
+  target_asn: number
+  node: string
+  result: 'success' | 'failed'
+}
+
+export const getAuditLogs = () => api.get<AuditLog[]>('/admin/audit')

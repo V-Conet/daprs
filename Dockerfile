@@ -13,7 +13,7 @@ FROM alpine:3.23 AS agent
 
 RUN apk update && apk add --no-cache bird
 
-RUN apk add --no-cache bird wireguard-tools
+RUN apk add --no-cache bird wireguard-tools bind-tools
 
 WORKDIR /app
 
