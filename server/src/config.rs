@@ -1,7 +1,7 @@
 //! Server 配置模块
 
 use serde::{Deserialize, Serialize};
-use shared::rate_limiter::RateLimitConfig;
+use shared::{AgentNode, rate_limiter::RateLimitConfig};
 
 /// 应用全局状态
 #[derive(Clone)]
@@ -10,6 +10,8 @@ pub struct AppState {
     pub config: Config,
     /// 数据库
     pub db: sled::Db,
+    /// HTTP 客户端
+    pub http: reqwest::Client,
 }
 
 /// Server 完整配置
@@ -61,6 +63,12 @@ pub struct ServerConfig {
     pub api_token: String,
     /// Keepalive 时间
     pub alive: u32,
+    /// sled 数据库路径
+    #[serde(default = "default_db_path")]
+    pub db_path: String,
+    /// Agent 请求超时时间（秒）
+    #[serde(default = "default_agent_timeout_secs")]
+    pub agent_timeout_secs: u64,
     /// Agent 服务器列表
     pub servers: Vec<ServerInfo>,
     /// 速率限制配置（可选）
@@ -72,13 +80,7 @@ pub struct ServerConfig {
 }
 
 /// Agent 服务器信息
-#[derive(Serialize, Deserialize, Clone)]
-pub struct ServerInfo {
-    /// 服务器名称
-    pub name: String,
-    /// 服务器地址（IP:PORT）
-    pub address: String,
-}
+pub type ServerInfo = AgentNode;
 
 /// 预定义的 OIDC Provider
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,4 +123,12 @@ impl WebConfig {
     pub fn discovery_url(&self) -> &'static str {
         self.provider.discovery_url()
     }
+}
+
+fn default_db_path() -> String {
+    "daprs.db".into()
+}
+
+fn default_agent_timeout_secs() -> u64 {
+    15
 }

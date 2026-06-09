@@ -37,7 +37,7 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let cli = cli::Cli::parse();
-    let config = load_config(&cli.config)?;
+    let config = Arc::new(load_config(&cli.config)?);
 
     tracing_subscriber::fmt::init();
 

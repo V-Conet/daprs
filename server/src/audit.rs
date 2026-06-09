@@ -101,7 +101,7 @@ pub fn get_all_logs(db: &Db) -> Result<Vec<AuditLog>, AppError> {
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    logs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    logs.sort_by_key(|log| std::cmp::Reverse(log.timestamp));
 
     Ok(logs)
 }

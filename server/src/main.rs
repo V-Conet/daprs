@@ -35,8 +35,12 @@ async fn run() -> Result<()> {
     let cli = cli::Cli::parse();
 
     let config = load_config(&cli.config)?;
-    let db = sled::open("daprs.db")?;
-    let state = AppState { config, db };
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(config.server.agent_timeout_secs))
+        .build()
+        .context("failed to build HTTP client")?;
+    let db = sled::open(&config.server.db_path)?;
+    let state = AppState { config, db, http };
 
     tracing_subscriber::fmt::init();
 
@@ -144,11 +148,13 @@ async fn run() -> Result<()> {
         app = app.layer(cors);
     }
 
+    let db_path = state.config.server.db_path.clone();
     let app = app.with_state(state);
 
     info!(
-        "Server is running on http://{}",
-        listener.local_addr().unwrap()
+        "Server is running on http://{} with db {}",
+        listener.local_addr().unwrap(),
+        db_path
     );
 
     axum::serve(listener, app).await?;

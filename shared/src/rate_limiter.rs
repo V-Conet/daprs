@@ -81,7 +81,7 @@ impl RateLimiter {
         let timestamps = inner.clients.entry(client_id.to_string()).or_default();
 
         // 淘汰窗口外的旧时间戳
-        while timestamps.front().map_or(false, |t| *t < cutoff) {
+        while timestamps.front().is_some_and(|t| *t < cutoff) {
             timestamps.pop_front();
         }
 
@@ -94,7 +94,7 @@ impl RateLimiter {
         // 定期全局清理
         if now - inner.last_cleanup > CLEANUP_INTERVAL {
             inner.clients.retain(|_, ts| {
-                while ts.front().map_or(false, |t| *t < cutoff) {
+                while ts.front().is_some_and(|t| *t < cutoff) {
                     ts.pop_front();
                 }
                 !ts.is_empty()

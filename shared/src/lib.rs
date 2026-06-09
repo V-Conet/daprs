@@ -151,6 +151,28 @@ impl Default for FrontendConfig {
     }
 }
 
+/// Agent 节点地址配置
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AgentNode {
+    /// 节点名称
+    pub name: String,
+    /// Agent API 地址
+    pub address: String,
+}
+
+/// 节点 Agent 配置响应
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct NodeAgentConfig {
+    /// Agent 地址
+    pub address: String,
+    /// 是否在线
+    pub online: bool,
+    /// 错误信息
+    pub error: Option<String>,
+    /// Agent 配置
+    pub conf: FrontendConfig,
+}
+
 // Peering 请求
 /// Peering 配置请求
 ///
@@ -198,6 +220,26 @@ pub struct RemoveRequest {
 }
 
 // 命令类型
+/// IP 协议版本
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IpVersion {
+    /// IPv4
+    V4,
+    /// IPv6
+    V6,
+}
+
+impl IpVersion {
+    /// 命令行参数形式
+    pub fn cli_arg(self) -> &'static str {
+        match self {
+            Self::V4 => "-4",
+            Self::V6 => "-6",
+        }
+    }
+}
+
 /// DNS 查询类型
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "UPPERCASE")]
@@ -271,7 +313,7 @@ pub enum Cmd {
     /// ```
     Ping {
         /// 协议版本 (4 或 6)
-        protocol: Option<u16>,
+        protocol: Option<IpVersion>,
         /// 发送次数，默认 4
         count: Option<u16>,
         /// 数据包大小
@@ -292,7 +334,7 @@ pub enum Cmd {
     /// ```
     Traceroute {
         /// 协议版本 (4 或 6)
-        protocol: Option<u16>,
+        protocol: Option<IpVersion>,
         /// 目标地址
         target: String,
     },
@@ -331,7 +373,7 @@ pub enum Cmd {
     /// 用法: tcping <host> <port> [-c count] [-t timeout]
     TcPing {
         /// 协议版本 (4 或 6)
-        protocol: Option<u16>,
+        protocol: Option<IpVersion>,
         /// 目标地址
         target: String,
         /// 目标端口
@@ -347,7 +389,7 @@ pub enum Cmd {
     /// 用法: route <target> [-4|-6]
     Route {
         /// 协议版本 (4 或 6)
-        protocol: Option<u16>,
+        protocol: Option<IpVersion>,
         /// 目标地址（支持 CIDR）
         target: String,
     },
@@ -357,10 +399,52 @@ pub enum Cmd {
     /// 用法: path <target> [-4|-6]
     Path {
         /// 协议版本 (4 或 6)
-        protocol: Option<u16>,
+        protocol: Option<IpVersion>,
         /// 目标地址
         target: String,
     },
+}
+
+impl Cmd {
+    /// 命令名称，适合日志、审计和 UI 展示。
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Ping { .. } => "ping",
+            Self::Traceroute { .. } => "traceroute",
+            Self::Dig { .. } => "dig",
+            Self::WgShow { .. } => "wg_show",
+            Self::BirdShow { .. } => "bird_show",
+            Self::TcPing { .. } => "tcping",
+            Self::Route { .. } => "route",
+            Self::Path { .. } => "path",
+        }
+    }
+
+    /// 命令目标；没有传统目标地址的命令返回其主要对象。
+    pub fn target(&self) -> &str {
+        match self {
+            Self::Ping { target, .. }
+            | Self::Traceroute { target, .. }
+            | Self::Dig { target, .. }
+            | Self::TcPing { target, .. }
+            | Self::Route { target, .. }
+            | Self::Path { target, .. } => target,
+            Self::WgShow { interface } => interface,
+            Self::BirdShow { protocol } => protocol,
+        }
+    }
+
+    /// 命令指定的 IP 协议版本。
+    pub fn ip_version(&self) -> Option<IpVersion> {
+        match self {
+            Self::Ping { protocol, .. }
+            | Self::Traceroute { protocol, .. }
+            | Self::TcPing { protocol, .. }
+            | Self::Route { protocol, .. }
+            | Self::Path { protocol, .. } => *protocol,
+            Self::Dig { .. } | Self::WgShow { .. } | Self::BirdShow { .. } => None,
+        }
+    }
 }
 
 /// 命令请求

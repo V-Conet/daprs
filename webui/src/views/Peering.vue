@@ -17,7 +17,6 @@ const success = ref<string | null>(null)
 const isModify = ref(false)
 const existingConfig = ref<PeerInfoResponse | null>(null)
 
-// 表单数据 - BGP Extensions 默认启用
 const form = ref<PeeringPayload>({
   is_mhp: true,
   is_nhp: true,
@@ -32,14 +31,12 @@ const form = ref<PeeringPayload>({
   mtu: 1420
 })
 
-// 监听 MP-BGP 开关，关闭时自动关闭 ENH
 function onMhpChange(value: boolean) {
   if (!value) {
     form.value.is_nhp = false
   }
 }
 
-// 计算默认端口
 const defaultPort = computed(() => {
   const asn = authStore.asn
   if (!asn) return null
@@ -50,17 +47,14 @@ const defaultPort = computed(() => {
   }
 })
 
-// 计算实际使用的端口
 const actualPort = computed(() => {
   return form.value.custom_port || defaultPort.value
 })
 
-// 判断是否为纯 IPv6 地址（包含冒号）
 const isIpv6Address = (addr: string): boolean => {
   return addr.includes(':') && !addr.startsWith('[')
 }
 
-// 计算 IPv4 Endpoint
 const endpointV4 = computed(() => {
   if (!node.value) return null
   const dn42 = node.value.conf.dn42
@@ -71,13 +65,11 @@ const endpointV4 = computed(() => {
   return null
 })
 
-// 计算 IPv6 Endpoint
 const endpointV6 = computed(() => {
   if (!node.value) return null
   const dn42 = node.value.conf.dn42
   const port = actualPort.value
   if (dn42.ipv6_addr) {
-    // 纯 IPv6 地址需要加方括号，域名不需要
     if (isIpv6Address(dn42.ipv6_addr)) {
       return `[${dn42.ipv6_addr}]:${port}`
     }
@@ -86,12 +78,10 @@ const endpointV6 = computed(() => {
   return null
 })
 
-// 节点是否需要验证
 const needsVerification = computed(() => node.value?.conf.is_verify === true)
 
 onMounted(async () => {
   try {
-    // 加载节点信息
     const response = await getNodes()
     node.value = response.data[nodeName] || null
 
@@ -101,17 +91,14 @@ onMounted(async () => {
       return
     }
 
-    // 尝试获取现有配置
     try {
       const configResponse = await getPeerInfo(nodeName)
       const data = configResponse.data
 
-      // 检查是否有现有配置
       if (data.wg && data.bird) {
         existingConfig.value = data
         isModify.value = true
 
-        // 填充表单
         form.value = {
           is_mhp: data.bird.is_mhp,
           is_nhp: data.bird.is_nhp,
@@ -127,7 +114,6 @@ onMounted(async () => {
         }
       }
     } catch {
-      // 没有现有配置，是新建模式
       isModify.value = false
     }
   } catch (e) {
@@ -142,7 +128,6 @@ async function submitForm() {
   submitting.value = true
   error.value = null
 
-  // 验证数值字段
   if (form.value.custom_port !== null) {
     if (isNaN(form.value.custom_port) || form.value.custom_port < 1024 || form.value.custom_port > 65535) {
       error.value = 'Port must be between 1024 and 65535'
@@ -158,7 +143,6 @@ async function submitForm() {
     }
   }
 
-  // 构建干净的 payload，确保 null 值正确处理
   const payload: PeeringPayload = {
     is_mhp: form.value.is_mhp,
     is_nhp: form.value.is_nhp,
@@ -175,18 +159,12 @@ async function submitForm() {
 
   try {
     if (isModify.value) {
-      await modifyPeering({
-        node: nodeName,
-        payload
-      })
+      await modifyPeering({ node: nodeName, payload })
       success.value = 'Peering updated successfully!'
     } else {
-      await createPeering({
-        node: nodeName,
-        payload
-      })
+      await createPeering({ node: nodeName, payload })
       if (needsVerification.value) {
-        success.value = 'Request submitted! Waiting for admin approval. You can check the status on the Dashboard.'
+        success.value = 'Request submitted! Waiting for admin approval.'
       } else {
         success.value = 'Peering created successfully!'
       }
@@ -207,274 +185,530 @@ function goBack() {
 </script>
 
 <template>
-  <div>
-    <div class="d-flex align-items-center mb-4">
-      <button @click="goBack" class="btn btn-outline-secondary btn-sm me-3">
-        <i class="bi bi-arrow-left"></i>
+  <div class="peering-page">
+    <div class="page-header">
+      <button @click="goBack" class="btn-back">
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="19" y1="12" x2="5" y2="12"></line>
+          <polyline points="12 19 5 12 12 5"></polyline>
+        </svg>
       </button>
-      <h2 class="mb-0">
-        <i class="bi me-2" :class="isModify ? 'bi-pencil' : 'bi-plus-circle'"></i>
-        {{ isModify ? 'Modify' : 'Add' }} Peering: {{ nodeName }}
-      </h2>
+      <h2>{{ isModify ? 'Modify' : 'Add' }} Peering · {{ nodeName }}</h2>
     </div>
 
-    <div v-if="loading" class="text-center py-5">
-      <div class="spinner-border text-primary" role="status">
-        <span class="visually-hidden">Loading...</span>
-      </div>
+    <div v-if="loading" class="loading-state">
+      <div class="spinner"></div>
     </div>
 
-    <div v-else-if="error && !node" class="alert alert-danger">
+    <div v-else-if="error && !node" class="error-state">
       {{ error }}
     </div>
 
     <template v-else-if="node">
-      <div class="card shadow-sm">
-        <div class="card-body">
-          <form @submit.prevent="submitForm">
-            <!-- 节点信息 -->
-            <div class="alert alert-info">
-              <strong>Your ASN:</strong> {{ authStore.asn }} |
-              <strong>Target ASN:</strong> {{ node.conf.dn42.asn }}
-              <span v-if="isModify" class="badge bg-success ms-2">Existing Peer</span>
-              <span v-else-if="needsVerification" class="badge bg-warning text-dark ms-2">Requires Approval</span>
-            </div>
-
-            <!-- 验证提示 -->
-            <div v-if="needsVerification && !isModify" class="alert alert-warning mb-3">
-              <i class="bi bi-exclamation-triangle me-2"></i>
-              <strong>Verification Required:</strong> Your peering request will be submitted for admin approval.
-              You can check the status on the Dashboard after submission.
-            </div>
-
-            <!-- 成功提示 -->
-            <div v-if="success" class="alert alert-success mb-3">
-              <i class="bi bi-check-circle me-2"></i>
-              {{ success }}
-            </div>
-
-            <!-- 现有配置提示 -->
-            <div v-if="isModify && existingConfig?.bird" class="alert alert-secondary mb-3">
-              <small>
-                <strong>Current BGP Session:</strong> {{ existingConfig.bird.session_type }}
-                <span v-if="existingConfig.wg?.port"> | Port: {{ existingConfig.wg.port }}</span>
-              </small>
-            </div>
-
-            <!-- WireGuard 配置 -->
-            <h5 class="mb-3">
-              <i class="bi bi-shield-lock me-1"></i>
-              WireGuard Configuration
-            </h5>
-
-            <div class="row g-3 mb-4">
-              <div class="col-md-6">
-                <label class="form-label">Endpoint *</label>
-                <input
-                  v-model="form.endpoint"
-                  type="text"
-                  class="form-control font-monospace"
-                  placeholder="e.g., example.com:51820"
-                  required
-                />
-                <div class="form-text">Your WireGuard endpoint</div>
-              </div>
-
-              <div class="col-md-6">
-                <label class="form-label">Public Key *</label>
-                <input
-                  v-model="form.pubkey"
-                  type="text"
-                  class="form-control font-monospace"
-                  placeholder="WireGuard public key"
-                  required
-                />
-              </div>
-            </div>
-
-            <div class="row g-3 mb-4">
-              <div class="col-md-4">
-                <label class="form-label">Pre-Shared Key</label>
-                <input
-                  v-model="form.psk"
-                  type="text"
-                  class="form-control font-monospace"
-                  placeholder="Optional PSK"
-                />
-                <div class="form-text">Optional: provides post-quantum security</div>
-              </div>
-
-              <div class="col-md-4">
-                <label class="form-label">MTU</label>
-                <input
-                  v-model.number="form.mtu"
-                  type="number"
-                  class="form-control"
-                  placeholder="1420"
-                  min="576"
-                  max="9000"
-                />
-              </div>
-
-              <div class="col-md-4">
-                <label class="form-label">Port</label>
-                <input
-                  v-model.number="form.custom_port"
-                  type="number"
-                  class="form-control"
-                  :placeholder="`Default: ${defaultPort}`"
-                  min="1024"
-                  max="65535"
-                />
-                <div class="form-text">Leave empty for auto: {{ defaultPort }}</div>
-              </div>
-            </div>
-
-            <!-- IP 地址配置 -->
-            <h5 class="mb-3">
-              <i class="bi bi-diagram-3 me-1"></i>
-              IP Address Configuration
-            </h5>
-
-            <div class="row g-3 mb-4">
-              <div class="col-md-6">
-                <label class="form-label">Tunnel IPv4</label>
-                <input
-                  v-model="form.v4"
-                  type="text"
-                  class="form-control font-monospace"
-                  placeholder="DN42 IPv4 address"
-                />
-              </div>
-
-              <div class="col-md-6">
-                <label class="form-label">Tunnel IPv6</label>
-                <input
-                  v-model="form.v6"
-                  type="text"
-                  class="form-control font-monospace"
-                  placeholder="DN42 IPv6 or Link-Local address"
-                />
-                <div class="form-text">Link-local address recommended</div>
-              </div>
-            </div>
-
-            <!-- BGP 扩展 -->
-            <h5 class="mb-3">
-              <i class="bi bi-sliders me-1"></i>
-              BGP Extensions
-            </h5>
-
-            <div class="card border mb-4">
-              <div class="card-body">
-                <div class="form-check form-switch mb-2">
-                  <input
-                    v-model="form.is_mhp"
-                    class="form-check-input"
-                    type="checkbox"
-                    id="mpbgp"
-                    @change="onMhpChange(form.is_mhp)"
-                  />
-                  <label class="form-check-label" for="mpbgp">
-                    <strong>Multiprotocol BGP (MP-BGP)</strong>
-                    <span class="d-block form-text">Single BGP session for both IPv4 and IPv6 routes</span>
-                  </label>
-                </div>
-
-                <div class="form-check form-switch">
-                  <input
-                    v-model="form.is_nhp"
-                    class="form-check-input"
-                    type="checkbox"
-                    id="enexthop"
-                    :disabled="!form.is_mhp"
-                  />
-                  <label class="form-check-label" for="enexthop">
-                    <strong>Extended Next Hop (IPv6 session)</strong>
-                    <span class="d-block form-text">Use IPv6 session to carry IPv4 routes (ENH)</span>
-                  </label>
-                </div>
-              </div>
-            </div>
-
-            <!-- 提供给对方的信息 -->
-            <h5 class="mb-3">
-              <i class="bi bi-share me-1"></i>
-              Information for Your Side
-            </h5>
-            <p class="text-muted small mb-3">Provide this information to the peer for their configuration.</p>
-
-            <div class="card border mb-4">
-              <div class="card-body">
-                <div class="row">
-                  <div class="col-md-6">
-                    <dl class="row mb-0">
-                      <dt class="col-sm-4 text-muted small">IPv4 Endpoint</dt>
-                      <dd class="col-sm-8 font-monospace small">
-                        <code v-if="endpointV4">{{ endpointV4 }}</code>
-                        <span v-else class="text-warning">Not configured</span>
-                      </dd>
-
-                      <dt class="col-sm-4 text-muted small">IPv6 Endpoint</dt>
-                      <dd class="col-sm-8 font-monospace small">
-                        <code v-if="endpointV6">{{ endpointV6 }}</code>
-                        <span v-else class="text-warning">Not configured</span>
-                      </dd>
-
-                      <dt class="col-sm-4 text-muted small">Public Key</dt>
-                      <dd class="col-sm-8 font-monospace small text-break">
-                        <code style="font-size: 0.7rem;">{{ node?.conf.dn42.wgkey || 'N/A' }}</code>
-                      </dd>
-                    </dl>
-                  </div>
-                  <div class="col-md-6">
-                    <dl class="row mb-0">
-                      <dt class="col-sm-4 text-muted small">DN42 IPv4</dt>
-                      <dd class="col-sm-8 font-monospace small">
-                        <code v-if="node?.conf.dn42.ipv4">{{ node.conf.dn42.ipv4 }}</code>
-                        <span v-else class="text-warning">Not configured</span>
-                      </dd>
-
-                      <dt class="col-sm-4 text-muted small">DN42 IPv6</dt>
-                      <dd class="col-sm-8 font-monospace small">
-                        <code v-if="node?.conf.dn42.ipv6">{{ node.conf.dn42.ipv6 }}</code>
-                        <span v-else class="text-warning">Not configured</span>
-                      </dd>
-
-                      <dt class="col-sm-4 text-muted small">Link-Local</dt>
-                      <dd class="col-sm-8 font-monospace small">
-                        <code v-if="node?.conf.dn42.lla">{{ node.conf.dn42.lla }}</code>
-                        <span v-else class="text-warning">Not configured</span>
-                      </dd>
-                    </dl>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <!-- 错误提示 -->
-            <div v-if="error" class="alert alert-danger">
-              {{ error }}
-            </div>
-
-            <!-- 提交按钮 -->
-            <div class="d-flex justify-content-end gap-2">
-              <button type="button" @click="goBack" class="btn btn-outline-secondary">
-                Cancel
-              </button>
-              <button
-                type="submit"
-                class="btn"
-                :class="isModify ? 'btn-warning' : 'btn-primary'"
-                :disabled="submitting"
-              >
-                <span v-if="submitting" class="spinner-border spinner-border-sm me-1"></span>
-                {{ isModify ? 'Update Peering' : 'Create Peering' }}
-              </button>
-            </div>
-          </form>
+      <form @submit.prevent="submitForm" class="form-container">
+        <!-- Info Banner -->
+        <div class="info-banner">
+          <div class="asn-info">
+            <span>Your ASN: <strong>{{ authStore.asn }}</strong></span>
+            <span>Target ASN: <strong>{{ node.conf.dn42.asn }}</strong></span>
+          </div>
+          <span v-if="isModify" class="badge success">Existing Peer</span>
+          <span v-else-if="needsVerification" class="badge warn">Requires Approval</span>
         </div>
-      </div>
+
+        <!-- Success Message -->
+        <div v-if="success" class="success-banner">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+            <polyline points="22 4 12 14.01 9 11.01"></polyline>
+          </svg>
+          {{ success }}
+        </div>
+
+        <!-- Verification Notice -->
+        <div v-if="needsVerification && !isModify" class="notice-banner">
+          Your peering request will be submitted for admin approval.
+        </div>
+
+        <!-- WireGuard Section -->
+        <div class="form-section">
+          <h3 class="section-title">WireGuard Configuration</h3>
+
+          <div class="form-grid">
+            <div class="form-group">
+              <label class="form-label">Endpoint *</label>
+              <input v-model="form.endpoint" type="text" class="form-input mono" placeholder="example.com:51820" required />
+              <span class="form-hint">Your WireGuard endpoint</span>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Public Key *</label>
+              <input v-model="form.pubkey" type="text" class="form-input mono" placeholder="WireGuard public key" required />
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Pre-Shared Key</label>
+              <input v-model="form.psk" type="text" class="form-input mono" placeholder="Optional PSK" />
+              <span class="form-hint">Optional: provides post-quantum security</span>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">MTU</label>
+              <input v-model.number="form.mtu" type="number" class="form-input" min="576" max="9000" />
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Port</label>
+              <input v-model.number="form.custom_port" type="number" class="form-input" min="1024" max="65535" :placeholder="`Default: ${defaultPort}`" />
+              <span class="form-hint">Leave empty for auto: {{ defaultPort }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- IP Section -->
+        <div class="form-section">
+          <h3 class="section-title">IP Address Configuration</h3>
+
+          <div class="form-grid">
+            <div class="form-group">
+              <label class="form-label">Tunnel IPv4</label>
+              <input v-model="form.v4" type="text" class="form-input mono" placeholder="DN42 IPv4 address" />
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Tunnel IPv6</label>
+              <input v-model="form.v6" type="text" class="form-input mono" placeholder="DN42 IPv6 or Link-Local" />
+              <span class="form-hint">Link-local address recommended</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- BGP Section -->
+        <div class="form-section">
+          <h3 class="section-title">BGP Extensions</h3>
+
+          <div class="toggle-group">
+            <label class="toggle-item">
+              <input type="checkbox" v-model="form.is_mhp" @change="onMhpChange(form.is_mhp)" />
+              <div class="toggle-content">
+                <span class="toggle-title">Multiprotocol BGP (MP-BGP)</span>
+                <span class="toggle-desc">Single BGP session for both IPv4 and IPv6 routes</span>
+              </div>
+            </label>
+
+            <label class="toggle-item">
+              <input type="checkbox" v-model="form.is_nhp" :disabled="!form.is_mhp" />
+              <div class="toggle-content">
+                <span class="toggle-title">Extended Next Hop (IPv6 session)</span>
+                <span class="toggle-desc">Use IPv6 session to carry IPv4 routes (ENH)</span>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <!-- Peer Info -->
+        <div class="form-section">
+          <h3 class="section-title">Information for Your Side</h3>
+          <p class="section-hint">Provide this information to the peer for their configuration.</p>
+
+          <div class="peer-info-grid">
+            <div class="peer-info-item">
+              <span class="peer-info-label">IPv4 Endpoint</span>
+              <code v-if="endpointV4" class="peer-info-value">{{ endpointV4 }}</code>
+              <span v-else class="peer-info-value na">Not configured</span>
+            </div>
+            <div class="peer-info-item">
+              <span class="peer-info-label">IPv6 Endpoint</span>
+              <code v-if="endpointV6" class="peer-info-value">{{ endpointV6 }}</code>
+              <span v-else class="peer-info-value na">Not configured</span>
+            </div>
+            <div class="peer-info-item">
+              <span class="peer-info-label">Public Key</span>
+              <code class="peer-info-value key">{{ node?.conf.dn42.wgkey || 'N/A' }}</code>
+            </div>
+            <div class="peer-info-item">
+              <span class="peer-info-label">DN42 IPv4</span>
+              <code v-if="node?.conf.dn42.ipv4" class="peer-info-value">{{ node.conf.dn42.ipv4 }}</code>
+              <span v-else class="peer-info-value na">Not configured</span>
+            </div>
+            <div class="peer-info-item">
+              <span class="peer-info-label">DN42 IPv6</span>
+              <code v-if="node?.conf.dn42.ipv6" class="peer-info-value">{{ node.conf.dn42.ipv6 }}</code>
+              <span v-else class="peer-info-value na">Not configured</span>
+            </div>
+            <div class="peer-info-item">
+              <span class="peer-info-label">Link-Local</span>
+              <code v-if="node?.conf.dn42.lla" class="peer-info-value">{{ node.conf.dn42.lla }}</code>
+              <span v-else class="peer-info-value na">Not configured</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Error -->
+        <div v-if="error" class="error-banner">
+          {{ error }}
+        </div>
+
+        <!-- Actions -->
+        <div class="form-actions">
+          <button type="button" @click="goBack" class="btn-cancel">Cancel</button>
+          <button type="submit" class="btn-submit" :class="{ update: isModify }" :disabled="submitting">
+            <span v-if="submitting" class="spinner-small"></span>
+            {{ isModify ? 'Update Peering' : 'Create Peering' }}
+          </button>
+        </div>
+      </form>
     </template>
   </div>
 </template>
+
+<style scoped>
+.peering-page {
+  padding: var(--space-xl) 0;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  margin-bottom: var(--space-xl);
+}
+
+.btn-back {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.btn-back:hover {
+  border-color: var(--text-tertiary);
+  color: var(--text-primary);
+}
+
+.page-header h2 {
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.loading-state, .error-state {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: var(--space-3xl);
+  color: var(--text-tertiary);
+}
+
+.spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--border-color);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.form-container {
+  max-width: 800px;
+}
+
+.info-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-md);
+  background: var(--accent-light);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-lg);
+}
+
+.asn-info {
+  display: flex;
+  gap: var(--space-lg);
+  font-size: 0.875rem;
+  color: var(--accent);
+}
+
+.badge {
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-full);
+}
+
+.badge.success {
+  background: var(--success-light);
+  color: var(--success);
+}
+
+.badge.warn {
+  background: var(--warning-light);
+  color: var(--warning);
+}
+
+.success-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  background: var(--success-light);
+  border: 1px solid var(--success);
+  border-radius: var(--radius-md);
+  color: var(--success);
+  margin-bottom: var(--space-lg);
+}
+
+.notice-banner {
+  padding: var(--space-md);
+  background: var(--warning-light);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-md);
+  color: var(--warning);
+  margin-bottom: var(--space-lg);
+  font-size: 0.875rem;
+}
+
+.form-section {
+  margin-bottom: var(--space-xl);
+}
+
+.section-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-md);
+}
+
+.section-hint {
+  font-size: 0.875rem;
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-md);
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-md);
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.form-label {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.form-input {
+  padding: var(--space-sm) var(--space-md);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  transition: border-color var(--transition-fast);
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.form-input.mono {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+}
+
+.form-hint {
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+}
+
+.toggle-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.toggle-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.toggle-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.toggle-item input {
+  margin-top: 2px;
+}
+
+.toggle-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.toggle-title {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.toggle-desc {
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+}
+
+.peer-info-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-sm);
+}
+
+.peer-info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.peer-info-label {
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+}
+
+.peer-info-value {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.peer-info-value.na {
+  color: var(--text-tertiary);
+  font-family: var(--font-sans);
+}
+
+.peer-info-value.key {
+  font-size: 0.7rem;
+  word-break: break-all;
+}
+
+.error-banner {
+  padding: var(--space-md);
+  background: var(--danger-light);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-md);
+  color: var(--danger);
+  margin-bottom: var(--space-lg);
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-md);
+  padding-top: var(--space-lg);
+  border-top: 1px solid var(--border-color);
+}
+
+.btn-cancel {
+  padding: var(--space-sm) var(--space-lg);
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.btn-cancel:hover {
+  border-color: var(--text-tertiary);
+  color: var(--text-primary);
+}
+
+.btn-submit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-lg);
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-inverse);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.btn-submit:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.btn-submit.update {
+  background: var(--warning);
+}
+
+.btn-submit.update:hover:not(:disabled) {
+  background: #d97706;
+}
+
+.btn-submit:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.spinner-small {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+@media (max-width: 640px) {
+  .form-grid, .peer-info-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .asn-info {
+    flex-direction: column;
+    gap: var(--space-xs);
+  }
+
+  .info-banner {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-sm);
+  }
+}
+</style>

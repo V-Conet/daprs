@@ -27,6 +27,12 @@ const REMOVE_QUEUE: &str = "remove_queue";
 const PENDING_QUEUE: &str = "pending_queue";
 const PENDING_TTL_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
 
+fn log_audit_result(result: Result<(), AppError>) {
+    if let Err(e) = result {
+        tracing::error!("failed to write audit log: {e}");
+    }
+}
+
 // 节点管理
 /// 获取所有节点列表
 ///
@@ -34,7 +40,7 @@ const PENDING_TTL_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
 pub async fn get_nodes(
     State(state): State<AppState>,
 ) -> Result<Json<BTreeMap<String, NodeAgentConfig>>, AppError> {
-    let client = reqwest::Client::new();
+    let client = state.http.clone();
     let mut nodes = BTreeMap::new();
 
     for server in &state.config.server.servers {
@@ -76,12 +82,8 @@ pub async fn post_peering(
         .find(|s| s.name == action.node)
         .ok_or(AppError::BadRequest("node not found".into()))?;
 
-    let (node_config, _online, _error) = fetch_agent_config(
-        &reqwest::Client::new(),
-        &state.config.server.api_token,
-        &server.address,
-    )
-    .await;
+    let (node_config, _online, _error) =
+        fetch_agent_config(&state.http, &state.config.server.api_token, &server.address).await;
 
     if node_config.is_verify {
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -131,14 +133,14 @@ pub async fn post_peering(
             )?;
         }
         Err(e) => {
-            let _ = audit::log_operation(
+            log_audit_result(audit::log_operation(
                 &state.db,
                 asn,
                 shared::ActionType::Create,
                 asn,
                 &action.node,
                 shared::ActionResult::Failed(e.to_string()),
-            );
+            ));
         }
     }
 
@@ -181,14 +183,14 @@ pub async fn post_modify(
             )?;
         }
         Err(e) => {
-            let _ = audit::log_operation(
+            log_audit_result(audit::log_operation(
                 &state.db,
                 asn,
                 shared::ActionType::Modify,
                 asn,
                 &action.node,
                 shared::ActionResult::Failed(e.to_string()),
-            );
+            ));
         }
     }
 
@@ -224,24 +226,24 @@ pub async fn post_remove(
             let _ = remove_from_queue(&state.db, PEERING_QUEUE, &req.node);
             let _ = remove_from_queue(&state.db, MODIFY_QUEUE, &req.node);
             let _ = remove_from_queue(&state.db, REMOVE_QUEUE, &req.node);
-            let _ = audit::log_operation(
+            log_audit_result(audit::log_operation(
                 &state.db,
                 asn,
                 shared::ActionType::Delete,
                 asn,
                 &req.node,
                 shared::ActionResult::Success,
-            );
+            ));
         }
         Err(e) => {
-            let _ = audit::log_operation(
+            log_audit_result(audit::log_operation(
                 &state.db,
                 asn,
                 shared::ActionType::Delete,
                 asn,
                 &req.node,
                 shared::ActionResult::Failed(e.to_string()),
-            );
+            ));
         }
     }
 
@@ -311,7 +313,9 @@ pub async fn post_cmd(
 
     let url = normalize_agent_base_url(&server.address) + "/cmd";
 
-    let resp = reqwest::Client::new()
+    let resp = state
+        .http
+        .clone()
         .post(&url)
         .header("x-api-token", &state.config.server.api_token)
         .json(&action.payload)
@@ -357,7 +361,9 @@ pub async fn get_peer_info(
 
     let url = normalize_agent_base_url(&server.address) + "/peer_info";
 
-    let resp = reqwest::Client::new()
+    let resp = state
+        .http
+        .clone()
         .get(&url)
         .header("x-api-token", &state.config.server.api_token)
         .header("asn", asn.to_string())
@@ -402,7 +408,9 @@ async fn dispatch_to_agent(
 
     let url = normalize_agent_base_url(&server.address) + path;
 
-    let mut req = reqwest::Client::new()
+    let mut req = state
+        .http
+        .clone()
         .request(method, url)
         .header("x-api-token", &state.config.server.api_token)
         .header("asn", asn.to_string());
@@ -439,10 +447,10 @@ fn sanitize_agent_error(error: &str) -> String {
     }
 
     // 尝试从 JSON 提取错误消息
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(error) {
-        if let Some(msg) = json.get("error").and_then(|v| v.as_str()) {
-            return sanitize_sensitive_info(msg);
-        }
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(error)
+        && let Some(msg) = json.get("error").and_then(|v| v.as_str())
+    {
+        return sanitize_sensitive_info(msg);
     }
 
     sanitize_sensitive_info(error)
@@ -598,13 +606,11 @@ pub async fn get_my_pending_requests(
     let session = require_session(&state, &headers)?;
     let asn = get_session_asn(&session);
 
+    cleanup_expired_pending(&state.db)?;
     let mut requests = read_all_from_queue::<PendingRequest>(&state.db, PENDING_QUEUE)?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = now_unix_secs();
 
-    requests.retain(|r| r.asn == asn && now - r.created_at < PENDING_TTL_SECS);
+    requests.retain(|r| r.asn == asn && now.saturating_sub(r.created_at) < PENDING_TTL_SECS);
     Ok(Json(requests))
 }
 
@@ -614,6 +620,7 @@ pub async fn get_pending_requests(
     headers: HeaderMap,
 ) -> Result<Json<Vec<PendingRequest>>, AppError> {
     let _session = require_admin(&state, &headers)?;
+    cleanup_expired_pending(&state.db)?;
     let requests = read_all_from_queue::<PendingRequest>(&state.db, PENDING_QUEUE)?;
     Ok(Json(requests))
 }
@@ -655,14 +662,14 @@ pub async fn approve_request(
             )?;
         }
         Err(e) => {
-            let _ = audit::log_operation(
+            log_audit_result(audit::log_operation(
                 &state.db,
                 actor_asn,
                 shared::ActionType::Approve,
                 pending.asn,
                 &pending.node,
                 shared::ActionResult::Failed(e.to_string()),
-            );
+            ));
         }
     }
 
@@ -704,7 +711,7 @@ pub async fn get_all_peers(
     let _session = require_admin(&state, &headers)?;
 
     let mut result = BTreeMap::new();
-    let client = reqwest::Client::new();
+    let client = state.http.clone();
 
     for server in &state.config.server.servers {
         // 获取该节点的所有 peer ASN 列表
@@ -790,14 +797,14 @@ pub async fn admin_modify_peer(
             )?;
         }
         Err(e) => {
-            let _ = audit::log_operation(
+            log_audit_result(audit::log_operation(
                 &state.db,
                 actor_asn,
                 shared::ActionType::Modify,
                 req.asn,
                 &req.node,
                 shared::ActionResult::Failed(e.to_string()),
-            );
+            ));
         }
     }
 
@@ -838,14 +845,14 @@ pub async fn admin_delete_peer(
             )?;
         }
         Err(e) => {
-            let _ = audit::log_operation(
+            log_audit_result(audit::log_operation(
                 &state.db,
                 actor_asn,
                 shared::ActionType::Delete,
                 req.asn,
                 &req.node,
                 shared::ActionResult::Failed(e.to_string()),
-            );
+            ));
         }
     }
 
@@ -866,6 +873,40 @@ pub struct AdminPeerRequest {
 pub struct AdminDeleteRequest {
     pub node: String,
     pub asn: u32,
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn cleanup_expired_pending(db: &sled::Db) -> Result<(), AppError> {
+    let tree = db
+        .open_tree(PENDING_QUEUE)
+        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
+    let now = now_unix_secs();
+    let mut removed = false;
+
+    for item in tree.iter() {
+        let (key, value) = item.map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
+        let Ok(request) = serde_json::from_slice::<PendingRequest>(&value) else {
+            continue;
+        };
+        if now.saturating_sub(request.created_at) >= PENDING_TTL_SECS {
+            tree.remove(key)
+                .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
+            removed = true;
+        }
+    }
+
+    if removed {
+        tree.flush()
+            .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
+    }
+
+    Ok(())
 }
 
 /// 获取单个待审核请求

@@ -171,7 +171,7 @@ pub async fn logout(
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().append(
         header::SET_COOKIE,
-        HeaderValue::from_static("daprs_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"),
+        build_clear_session_cookie(&state.config.web)?,
     );
     Ok(response)
 }
@@ -215,7 +215,6 @@ pub(crate) fn require_admin(
 }
 
 /// 从 userinfo 提取 ASN
-
 fn extract_asn(userinfo: &Value) -> Option<u32> {
     userinfo
         .get("dn42")
@@ -403,23 +402,52 @@ fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
 
 /// 构建 Session Cookie
 fn build_session_cookie(session_id: &str, web: &WebConfig) -> Result<HeaderValue, AppError> {
+    let attrs = session_cookie_attrs(web);
+    let cookie = format!(
+        "{}={}; Path=/; Max-Age={}; HttpOnly{}{}",
+        SESSION_COOKIE, session_id, SESSION_TTL_SECS, attrs.same_site, attrs.secure,
+    );
+    HeaderValue::from_str(&cookie)
+        .map_err(|e| AppError::InternalError(format!("cookie error: {e}")))
+}
+
+fn build_clear_session_cookie(web: &WebConfig) -> Result<HeaderValue, AppError> {
+    let attrs = session_cookie_attrs(web);
+    let cookie = format!(
+        "{}=; Path=/; Max-Age=0; HttpOnly{}{}",
+        SESSION_COOKIE, attrs.same_site, attrs.secure,
+    );
+    HeaderValue::from_str(&cookie)
+        .map_err(|e| AppError::InternalError(format!("cookie error: {e}")))
+}
+
+struct SessionCookieAttrs {
+    same_site: &'static str,
+    secure: &'static str,
+}
+
+fn session_cookie_attrs(web: &WebConfig) -> SessionCookieAttrs {
     let secure = web.redirect_uri.starts_with("https://")
         || web
             .frontend_origin
             .as_ref()
             .is_some_and(|o| o.starts_with("https://"));
+
     let same_site = if web.frontend_origin.is_some() && secure {
         "; SameSite=None"
     } else {
+        if web.frontend_origin.is_some() && !secure {
+            tracing::warn!(
+                "frontend_origin is configured without HTTPS; using SameSite=Lax because SameSite=None requires Secure"
+            );
+        }
         "; SameSite=Lax"
     };
-    let secure_attr = if secure { "; Secure" } else { "" };
-    let cookie = format!(
-        "{}={}; Path=/; Max-Age={}; HttpOnly{}{}",
-        SESSION_COOKIE, session_id, SESSION_TTL_SECS, same_site, secure_attr,
-    );
-    HeaderValue::from_str(&cookie)
-        .map_err(|e| AppError::InternalError(format!("cookie error: {e}")))
+
+    SessionCookieAttrs {
+        same_site,
+        secure: if secure { "; Secure" } else { "" },
+    }
 }
 
 /// 获取当前 Unix 时间戳

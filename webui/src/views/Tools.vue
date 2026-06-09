@@ -9,34 +9,32 @@ const loading = ref(false)
 const output = ref('')
 const error = ref<string | null>(null)
 
-// Ping 参数
+// Ping
 const pingCount = ref(4)
-const pingProtocol = ref<number | null>(null)
+const pingProtocol = ref<string | null>(null)
 
-// Traceroute 参数
-const tracerouteProtocol = ref<number | null>(null)
+// Traceroute
+const tracerouteProtocol = ref<string | null>(null)
 
-// Dig 参数
+// Dig
 const digType = ref('A')
 const digServer = ref('')
 
-// TcPing 参数
+// TcPing
 const tcpingPort = ref(443)
 const tcpingCount = ref(5)
 const tcpingTimeout = ref(3)
-const tcpingProtocol = ref<number | null>(null)
+const tcpingProtocol = ref<string | null>(null)
 
-// 目标地址
+// Target
 const target = ref('')
 
-// 计算在线节点
 const onlineNodes = computed(() => {
   return Object.entries(nodes.value)
     .filter(([, n]) => n.online)
     .map(([name]) => name)
 })
 
-// 加载节点列表
 async function loadNodes() {
   try {
     const response = await getNodes()
@@ -133,7 +131,6 @@ async function executeCommand() {
     const response = await executeCmd(selectedNode.value, cmd)
     output.value = response.data
   } catch (e: any) {
-    // 处理超时错误
     if (e.code === 'ECONNABORTED' || e.message?.includes('timeout')) {
       error.value = 'Command timed out. The operation took too long to complete.'
     } else {
@@ -150,171 +147,391 @@ function clearOutput() {
   output.value = ''
   error.value = null
 }
+
+const commandOptions = [
+  { value: 'ping', label: 'Ping' },
+  { value: 'traceroute', label: 'Traceroute' },
+  { value: 'tcping', label: 'TCP Ping' },
+  { value: 'dig', label: 'Dig' },
+  { value: 'route', label: 'Route' },
+  { value: 'path', label: 'AS Path' }
+]
+
+const queryTypes = ['A', 'AAAA', 'MX', 'TXT', 'NS', 'SOA', 'CNAME', 'PTR']
 </script>
 
 <template>
-  <div>
-    <h2 class="mb-4">
-      Network Tools
-    </h2>
+  <div class="tools-page">
+    <h2 class="page-title">Network Tools</h2>
 
-    <!-- 节点选择 -->
-    <div class="card shadow-sm mb-4">
-      <div class="card-body">
-        <div class="row g-3 align-items-end">
-          <div class="col-md-3">
-            <label class="form-label">Node</label>
-            <select v-model="selectedNode" class="form-select">
-              <option v-for="name in onlineNodes" :key="name" :value="name">
-                {{ name }}
-              </option>
-            </select>
-            <div v-if="onlineNodes.length === 0" class="form-text text-danger">
-              No online nodes available
-            </div>
-          </div>
-
-          <div class="col-md-3">
-            <label class="form-label">Command</label>
-            <select v-model="cmdType" class="form-select">
-              <option value="ping">Ping</option>
-              <option value="traceroute">Traceroute</option>
-              <option value="tcping">TCP Ping</option>
-              <option value="dig">Dig</option>
-              <option value="route">Route</option>
-              <option value="path">AS Path</option>
-            </select>
-          </div>
-
-          <div class="col-md-4">
-            <label class="form-label">Target</label>
-            <input
-              v-model="target"
-              type="text"
-              class="form-control"
-              placeholder="IP address or hostname"
-              @keyup.enter="executeCommand"
-            />
-          </div>
-
-          <div class="col-md-2">
-            <button
-              @click="executeCommand"
-              class="btn btn-primary w-100"
-              :disabled="loading || !selectedNode || !target.trim()"
-            >
-              <span v-if="loading" class="spinner-border spinner-border-sm me-1"></span>
-              Run
-            </button>
-          </div>
+    <!-- Command Bar -->
+    <div class="command-bar">
+      <div class="command-row">
+        <div class="field-group">
+          <label class="field-label">Node</label>
+          <select v-model="selectedNode" class="field-select">
+            <option v-for="name in onlineNodes" :key="name" :value="name">
+              {{ name }}
+            </option>
+          </select>
         </div>
 
-        <!-- Ping 参数 -->
-        <div v-if="cmdType === 'ping'" class="row g-3 mt-2 pt-3 border-top">
-          <div class="col-md-3">
-            <label class="form-label small">Count</label>
-            <input v-model.number="pingCount" type="number" class="form-control form-control-sm" min="1" max="20" />
-          </div>
-          <div class="col-md-3">
-            <label class="form-label small">Protocol</label>
-            <select v-model="pingProtocol" class="form-select form-select-sm">
-              <option :value="null">Auto</option>
-              <option :value="4">IPv4</option>
-              <option :value="6">IPv6</option>
-            </select>
-          </div>
+        <div class="field-group">
+          <label class="field-label">Command</label>
+          <select v-model="cmdType" class="field-select">
+            <option v-for="opt in commandOptions" :key="opt.value" :value="opt.value">
+              {{ opt.label }}
+            </option>
+          </select>
         </div>
 
-        <!-- Traceroute 参数 -->
-        <div v-if="cmdType === 'traceroute'" class="row g-3 mt-2 pt-3 border-top">
-          <div class="col-md-3">
-            <label class="form-label small">Protocol</label>
-            <select v-model="tracerouteProtocol" class="form-select form-select-sm">
-              <option :value="null">Auto</option>
-              <option :value="4">IPv4</option>
-              <option :value="6">IPv6</option>
-            </select>
-          </div>
+        <div class="field-group grow">
+          <label class="field-label">Target</label>
+          <input
+            v-model="target"
+            type="text"
+            class="field-input"
+            placeholder="IP address or hostname"
+            @keyup.enter="executeCommand"
+          />
         </div>
 
-        <!-- Dig 参数 -->
-        <div v-if="cmdType === 'dig'" class="row g-3 mt-2 pt-3 border-top">
-          <div class="col-md-3">
-            <label class="form-label small">Query Type</label>
-            <select v-model="digType" class="form-select form-select-sm">
-              <option>A</option>
-              <option>AAAA</option>
-              <option>MX</option>
-              <option>TXT</option>
-              <option>NS</option>
-              <option>SOA</option>
-              <option>CNAME</option>
-              <option>PTR</option>
-            </select>
-          </div>
-          <div class="col-md-4">
-            <label class="form-label small">DNS Server (optional)</label>
-            <input v-model="digServer" type="text" class="form-control form-control-sm" placeholder="e.g., 172.20.0.53" />
-          </div>
-        </div>
+        <button
+          @click="executeCommand"
+          class="btn-run"
+          :disabled="loading || !selectedNode || !target.trim()"
+        >
+          <span v-if="loading" class="spinner-small"></span>
+          <span v-else>Run</span>
+        </button>
+      </div>
 
-        <!-- TcPing 参数 -->
-        <div v-if="cmdType === 'tcping'" class="row g-3 mt-2 pt-3 border-top">
-          <div class="col-md-2">
-            <label class="form-label small">Port</label>
-            <input v-model.number="tcpingPort" type="number" class="form-control form-control-sm" min="1" max="65535" />
-          </div>
-          <div class="col-md-2">
-            <label class="form-label small">Count</label>
-            <input v-model.number="tcpingCount" type="number" class="form-control form-control-sm" min="1" max="20" />
-          </div>
-          <div class="col-md-2">
-            <label class="form-label small">Timeout (s)</label>
-            <input v-model.number="tcpingTimeout" type="number" class="form-control form-control-sm" min="1" max="30" />
-          </div>
-          <div class="col-md-2">
-            <label class="form-label small">Protocol</label>
-            <select v-model="tcpingProtocol" class="form-select form-select-sm">
-              <option :value="null">Auto</option>
-              <option :value="4">IPv4</option>
-              <option :value="6">IPv6</option>
-            </select>
-          </div>
+      <!-- Ping Options -->
+      <div v-if="cmdType === 'ping'" class="options-row">
+        <div class="field-group small">
+          <label class="field-label">Count</label>
+          <input v-model.number="pingCount" type="number" class="field-input" min="1" max="20" />
         </div>
+        <div class="field-group small">
+          <label class="field-label">Protocol</label>
+          <select v-model="pingProtocol" class="field-select">
+            <option :value="null">Auto</option>
+            <option value="v4">IPv4</option>
+            <option value="v6">IPv6</option>
+          </select>
+        </div>
+      </div>
 
-        <!-- Route/Path 参数 - 不需要指定表 -->
-        <div v-if="cmdType === 'route' || cmdType === 'path'" class="row g-3 mt-2 pt-3 border-top">
-          <div class="col-12">
-            <p class="text-muted small mb-0">
-              <i class="bi bi-info-circle me-1"></i>
-              BIRD will automatically select the correct routing table.
-            </p>
-          </div>
+      <!-- Traceroute Options -->
+      <div v-if="cmdType === 'traceroute'" class="options-row">
+        <div class="field-group small">
+          <label class="field-label">Protocol</label>
+          <select v-model="tracerouteProtocol" class="field-select">
+            <option :value="null">Auto</option>
+            <option value="v4">IPv4</option>
+            <option value="v6">IPv6</option>
+          </select>
         </div>
+      </div>
+
+      <!-- Dig Options -->
+      <div v-if="cmdType === 'dig'" class="options-row">
+        <div class="field-group small">
+          <label class="field-label">Type</label>
+          <select v-model="digType" class="field-select">
+            <option v-for="t in queryTypes" :key="t" :value="t">{{ t }}</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label class="field-label">DNS Server</label>
+          <input v-model="digServer" type="text" class="field-input" placeholder="e.g., 172.20.0.53" />
+        </div>
+      </div>
+
+      <!-- TcPing Options -->
+      <div v-if="cmdType === 'tcping'" class="options-row">
+        <div class="field-group small">
+          <label class="field-label">Port</label>
+          <input v-model.number="tcpingPort" type="number" class="field-input" min="1" max="65535" />
+        </div>
+        <div class="field-group small">
+          <label class="field-label">Count</label>
+          <input v-model.number="tcpingCount" type="number" class="field-input" min="1" max="20" />
+        </div>
+        <div class="field-group small">
+          <label class="field-label">Timeout</label>
+          <input v-model.number="tcpingTimeout" type="number" class="field-input" min="1" max="30" />
+        </div>
+        <div class="field-group small">
+          <label class="field-label">Protocol</label>
+          <select v-model="tcpingProtocol" class="field-select">
+            <option :value="null">Auto</option>
+            <option value="v4">IPv4</option>
+            <option value="v6">IPv6</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Route/Path Info -->
+      <div v-if="cmdType === 'route' || cmdType === 'path'" class="options-row info">
+        BIRD will automatically select the correct routing table.
+      </div>
+
+      <div v-if="onlineNodes.length === 0" class="no-nodes">
+        No online nodes available
       </div>
     </div>
 
-    <!-- 错误提示 -->
-    <div v-if="error" class="alert alert-danger d-flex justify-content-between align-items-center">
+    <!-- Error -->
+    <div v-if="error" class="error-banner">
       <span>{{ error }}</span>
-      <button @click="clearOutput" class="btn btn-sm btn-outline-danger">Dismiss</button>
+      <button @click="clearOutput" class="btn-dismiss">×</button>
     </div>
 
-    <!-- 输出结果 -->
-    <div v-if="output" class="card shadow-sm">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <span class="fw-bold">Output</span>
-        <button @click="clearOutput" class="btn btn-sm btn-outline-secondary">Clear</button>
+    <!-- Output -->
+    <div v-if="output" class="output-container">
+      <div class="output-header">
+        <span>Output</span>
+        <button @click="clearOutput" class="btn-clear">Clear</button>
       </div>
-      <div class="card-body p-0">
-        <pre class="bg-dark text-light p-3 mb-0" style="max-height: 500px; overflow-y: auto; font-size: 0.85rem;">{{ output }}</pre>
-      </div>
+      <pre class="output-content">{{ output }}</pre>
     </div>
 
-    <!-- 空状态 -->
-    <div v-if="!output && !error" class="text-center py-5 text-muted">
-      <div class="display-4 mb-3">⌨</div>
+    <!-- Empty State -->
+    <div v-if="!output && !error" class="empty-state">
+      <div class="empty-icon">⌨</div>
       <p>Select a node, enter a target, and run a command</p>
     </div>
   </div>
 </template>
+
+<style scoped>
+.tools-page {
+  padding: var(--space-xl) 0;
+}
+
+.page-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin-bottom: var(--space-xl);
+}
+
+.command-bar {
+  padding: var(--space-lg);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-lg);
+}
+
+.command-row {
+  display: flex;
+  gap: var(--space-md);
+  align-items: flex-end;
+}
+
+.field-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.field-group.grow {
+  flex: 1;
+}
+
+.field-group.small {
+  width: 100px;
+}
+
+.field-label {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-tertiary);
+}
+
+.field-select, .field-input {
+  padding: var(--space-sm) var(--space-md);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  min-width: 120px;
+}
+
+.field-input {
+  min-width: auto;
+  width: 100%;
+}
+
+.field-select:focus, .field-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.btn-run {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 80px;
+  padding: var(--space-sm) var(--space-lg);
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-inverse);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.btn-run:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.btn-run:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.spinner-small {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.options-row {
+  display: flex;
+  gap: var(--space-md);
+  margin-top: var(--space-md);
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--border-color);
+}
+
+.options-row.info {
+  font-size: 0.875rem;
+  color: var(--text-tertiary);
+  padding: var(--space-md);
+  background: var(--bg-secondary);
+  border-radius: var(--radius-sm);
+}
+
+.no-nodes {
+  margin-top: var(--space-md);
+  font-size: 0.875rem;
+  color: var(--danger);
+}
+
+.error-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-md);
+  background: var(--danger-light);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-md);
+  color: var(--danger);
+  margin-bottom: var(--space-lg);
+}
+
+.btn-dismiss {
+  background: none;
+  border: none;
+  color: var(--danger);
+  font-size: 1.25rem;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.btn-dismiss:hover {
+  opacity: 1;
+}
+
+.output-container {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.output-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.btn-clear {
+  padding: var(--space-xs) var(--space-sm);
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.btn-clear:hover {
+  border-color: var(--text-tertiary);
+  color: var(--text-primary);
+}
+
+.output-content {
+  padding: var(--space-md);
+  background: var(--code-bg);
+  color: #e0e0e0;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  max-height: 500px;
+  overflow: auto;
+  white-space: pre;
+}
+
+.empty-state {
+  text-align: center;
+  padding: var(--space-3xl);
+  color: var(--text-tertiary);
+}
+
+.empty-icon {
+  font-size: 3rem;
+  margin-bottom: var(--space-md);
+  opacity: 0.5;
+}
+
+@media (max-width: 768px) {
+  .command-row {
+    flex-wrap: wrap;
+  }
+
+  .field-group.grow {
+    flex: 1 1 100%;
+  }
+
+  .btn-run {
+    width: 100%;
+  }
+
+  .options-row {
+    flex-wrap: wrap;
+  }
+
+  .field-group.small {
+    width: calc(50% - var(--space-sm));
+  }
+}
+</style>

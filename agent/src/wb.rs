@@ -2,7 +2,7 @@
 //!
 //! 负责 WireGuard 和 Bird 的配置生成与管理
 
-use std::{path::Path, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use axum::{
     Json,
@@ -16,8 +16,8 @@ use crate::utils::{parse_asn_header, run_cmd};
 use shared::{
     AppError, BirdConfig, PeerInfo, PeerInfoResponse, PeeringPayload, RawCommandOutput, WgConfig,
     validation::{
-        validate_dn42_ipv4, validate_dn42_ipv6, validate_endpoint, validate_mtu, validate_port,
-        validate_wg_key,
+        AsnType, validate_dn42_ipv4, validate_dn42_ipv6, validate_endpoint, validate_mtu,
+        validate_port, validate_wg_key,
     },
 };
 
@@ -27,7 +27,7 @@ use shared::{
 /// 生成 WireGuard 配置文件和 Bird BGP 配置文件，并启动隧道
 pub async fn create_config(
     headers: HeaderMap,
-    State(cfg): State<Config>,
+    State(cfg): State<Arc<Config>>,
     Json(peer): Json<PeeringPayload>,
 ) -> Result<StatusCode, AppError> {
     let asn = parse_asn_header(&headers)?;
@@ -55,11 +55,11 @@ pub async fn create_config(
     write_bird(&cfg, asn, &bird_conf)?;
 
     // 启动 WireGuard 接口
-    run_wg_quick_up(&cfg, asn).await;
+    run_wg_quick_up(&cfg, asn).await?;
 
     // 重载 Bird 配置
     // FIXME: birdc c not always work
-    run_birdc_configure(&cfg).await;
+    run_birdc_configure(&cfg).await?;
 
     Ok(StatusCode::CREATED)
 }
@@ -69,7 +69,7 @@ pub async fn create_config(
 /// 更新已有的 WireGuard 和 Bird 配置
 pub async fn modify_config(
     headers: HeaderMap,
-    State(cfg): State<Config>,
+    State(cfg): State<Arc<Config>>,
     Json(peer): Json<PeeringPayload>,
 ) -> Result<StatusCode, AppError> {
     let asn = parse_asn_header(&headers)?;
@@ -84,11 +84,11 @@ pub async fn modify_config(
     write_bird(&cfg, asn, &bird_conf)?;
 
     // 重启 WireGuard 接口
-    run_wg_quick_down(&cfg, asn).await;
-    run_wg_quick_up(&cfg, asn).await;
+    run_wg_quick_down(&cfg, asn).await?;
+    run_wg_quick_up(&cfg, asn).await?;
 
     // 重载 Bird 配置
-    run_birdc_configure(&cfg).await;
+    run_birdc_configure(&cfg).await?;
 
     Ok(StatusCode::OK)
 }
@@ -98,7 +98,7 @@ pub async fn modify_config(
 /// 删除 WireGuard 和 Bird 配置文件，并关闭隧道
 pub async fn delete_config(
     headers: HeaderMap,
-    State(cfg): State<Config>,
+    State(cfg): State<Arc<Config>>,
 ) -> Result<StatusCode, AppError> {
     let asn = parse_asn_header(&headers)?;
 
@@ -110,7 +110,7 @@ pub async fn delete_config(
 
     // 关闭 WireGuard 接口
     if wg_existed {
-        run_wg_quick_down(&cfg, asn).await;
+        run_wg_quick_down(&cfg, asn).await?;
     }
 
     // 删除配置文件
@@ -119,7 +119,7 @@ pub async fn delete_config(
 
     // 重载 Bird 配置
     if wg_existed || bird_existed {
-        run_birdc_configure(&cfg).await;
+        run_birdc_configure(&cfg).await?;
     }
 
     Ok(StatusCode::OK)
@@ -128,21 +128,19 @@ pub async fn delete_config(
 /// 列出所有 Peer
 ///
 /// 扫描配置目录，返回所有已配置的 Peer ASN 列表
-pub async fn list_all_peers(State(cfg): State<Config>) -> Result<Json<Vec<u32>>, AppError> {
+pub async fn list_all_peers(State(cfg): State<Arc<Config>>) -> Result<Json<Vec<u32>>, AppError> {
     let mut peers = std::collections::HashSet::new();
 
     // 扫描 WireGuard 配置目录
     if let Ok(entries) = std::fs::read_dir(&cfg.agent.wg_path) {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if let Some(asn_str) = name
+            if let Some(name) = entry.file_name().to_str()
+                && let Some(asn_str) = name
                     .strip_prefix("dn42-")
                     .and_then(|s| s.strip_suffix(".conf"))
-                {
-                    if let Ok(asn) = asn_str.parse::<u32>() {
-                        peers.insert(asn);
-                    }
-                }
+                && let Ok(asn) = asn_str.parse::<u32>()
+            {
+                peers.insert(asn);
             }
         }
     }
@@ -150,12 +148,11 @@ pub async fn list_all_peers(State(cfg): State<Config>) -> Result<Json<Vec<u32>>,
     // 扫描 Bird 配置目录
     if let Ok(entries) = std::fs::read_dir(&cfg.agent.bird_path) {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if let Some(asn_str) = name.strip_suffix(".conf") {
-                    if let Ok(asn) = asn_str.parse::<u32>() {
-                        peers.insert(asn);
-                    }
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && let Some(asn_str) = name.strip_suffix(".conf")
+                && let Ok(asn) = asn_str.parse::<u32>()
+            {
+                peers.insert(asn);
             }
         }
     }
@@ -170,7 +167,7 @@ pub async fn list_all_peers(State(cfg): State<Config>) -> Result<Json<Vec<u32>>,
 /// 返回 WireGuard 接口状态、Bird 协议状态和配置信息
 pub async fn get_peer_info(
     headers: HeaderMap,
-    State(cfg): State<Config>,
+    State(cfg): State<Arc<Config>>,
 ) -> Result<Json<PeerInfoResponse>, AppError> {
     let asn = parse_asn_header(&headers)?;
 
@@ -244,13 +241,9 @@ fn build_wg_config(asn: u32, peer: &PeeringPayload, cfg: &Config) -> String {
     let my_v4 = &cfg.agent.dn42.ipv4;
 
     // 计算端口：DN42 ASN 使用后5位，Clearnet ASN 使用 40000 + 后4位
-    let port = peer.custom_port.unwrap_or({
-        if asn >= 4242420000 {
-            (asn % 100000) as u16
-        } else {
-            40000 + (asn % 10000) as u16
-        }
-    });
+    let port = peer
+        .custom_port
+        .unwrap_or_else(|| AsnType::from_asn(asn).default_port(asn));
     let mtu = peer.mtu.unwrap_or(1420);
 
     let (ll_peer, ula_peer, v4_peer) = classify_peer_ips(peer);
@@ -404,13 +397,34 @@ fn gen_bird_protocol(
 /// 写入 WireGuard 配置文件
 fn write_wg(cfg: &Config, asn: u32, conf: &str) -> Result<(), AppError> {
     let path = format!("{}/dn42-{}.conf", cfg.agent.wg_path, asn);
-    std::fs::write(&path, conf)
+    write_secure_file(&path, conf)
         .map_err(|e| AppError::InternalError(format!("failed to write wg config: {e}")))
+}
+
+#[cfg(unix)]
+fn write_secure_file(path: &str, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(content.as_bytes())?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_secure_file(path: &str, content: &str) -> std::io::Result<()> {
+    std::fs::write(path, content)
 }
 
 /// 写入 Bird 配置文件
 fn write_bird(cfg: &Config, asn: u32, conf: &str) -> Result<(), AppError> {
-    let dir = format!("{}", cfg.agent.bird_path);
+    let dir = cfg.agent.bird_path.to_string();
     std::fs::create_dir_all(&dir)
         .map_err(|e| AppError::InternalError(format!("failed to create bird peers dir: {e}")))?;
 
@@ -424,10 +438,10 @@ fn write_bird(cfg: &Config, asn: u32, conf: &str) -> Result<(), AppError> {
 /// 如果文件不存在，静默返回（幂等操作）
 fn remove_wg(cfg: &Config, asn: u32) {
     let path = format!("{}/dn42-{}.conf", cfg.agent.wg_path, asn);
-    if std::path::Path::new(&path).exists() {
-        if let Err(e) = std::fs::remove_file(&path) {
-            eprintln!("wg remove error {path}: {e}");
-        }
+    if std::path::Path::new(&path).exists()
+        && let Err(e) = std::fs::remove_file(&path)
+    {
+        tracing::warn!("wg remove error {path}: {e}");
     }
 }
 
@@ -436,37 +450,53 @@ fn remove_wg(cfg: &Config, asn: u32) {
 /// 如果文件不存在，静默返回（幂等操作）
 fn remove_bird(cfg: &Config, asn: u32) {
     let path = format!("{}/{}.conf", cfg.agent.bird_path, asn);
-    if std::path::Path::new(&path).exists() {
-        if let Err(e) = std::fs::remove_file(&path) {
-            eprintln!("bird remove error {path}: {e}");
-        }
+    if std::path::Path::new(&path).exists()
+        && let Err(e) = std::fs::remove_file(&path)
+    {
+        tracing::warn!("bird remove error {path}: {e}");
     }
 }
 
 /// 启动 WireGuard 接口
-async fn run_wg_quick_up(cfg: &Config, asn: u32) {
-    run_cmd(cfg, "wg-quick", &["up", &format!("dn42-{asn}")]).await;
+async fn run_wg_quick_up(cfg: &Config, asn: u32) -> Result<(), AppError> {
+    let result = run_cmd(cfg, "wg-quick", &["up", &format!("dn42-{asn}")]).await;
+    if result.success {
+        Ok(())
+    } else {
+        tracing::error!("wg-quick up failed for ASN {asn}: {}", result.text);
+        Err(AppError::InternalError("wg-quick up failed".into()))
+    }
 }
 
 /// 关闭 WireGuard 接口
-async fn run_wg_quick_down(cfg: &Config, asn: u32) {
-    run_cmd(cfg, "wg-quick", &["down", &format!("dn42-{asn}")]).await;
+async fn run_wg_quick_down(cfg: &Config, asn: u32) -> Result<(), AppError> {
+    let result = run_cmd(cfg, "wg-quick", &["down", &format!("dn42-{asn}")]).await;
+    if result.success {
+        Ok(())
+    } else {
+        tracing::warn!("wg-quick down failed for ASN {asn}: {}", result.text);
+        Err(AppError::InternalError("wg-quick down failed".into()))
+    }
 }
 
 /// 重载 Bird 配置
 ///
 /// 使用 `birdc configure` 重载配置，带重试机制
-async fn run_birdc_configure(cfg: &Config) {
-    for _ in 1..=3 {
+async fn run_birdc_configure(cfg: &Config) -> Result<(), AppError> {
+    for attempt in 1..=3 {
         let result = run_cmd(cfg, "birdc", &["configure"]).await;
 
         if result.success {
-            return;
+            return Ok(());
         }
 
-        sleep(Duration::from_millis(200)).await;
-        eprintln!("birdc configure failed after 3 attempts: {}", result.text);
+        tracing::warn!("birdc configure attempt {attempt} failed: {}", result.text);
+        if attempt < 3 {
+            sleep(Duration::from_millis(200)).await;
+        }
     }
+
+    Err(AppError::InternalError("birdc configure failed".into()))
 }
 
 /// 获取实际存在的 Bird 协议名称
@@ -529,9 +559,8 @@ fn parse_wg_config(path: &str) -> Result<WgConfig, AppError> {
                 // 格式: PostUp = ip addr add xxx/xx peer yyy/xx dev %i
                 if let Some(peer_match) = line.split(" peer ").nth(1) {
                     let addr = peer_match.split('/').next().unwrap_or("").trim();
-                    if addr.starts_with("fe80:") {
-                        peer_v6 = Some(addr.to_string());
-                    } else if addr.starts_with("fd") || addr.starts_with("fc") {
+                    if addr.starts_with("fe80:") || addr.starts_with("fd") || addr.starts_with("fc")
+                    {
                         peer_v6 = Some(addr.to_string());
                     } else if addr.contains('.') {
                         peer_v4 = Some(addr.to_string());

@@ -130,7 +130,7 @@ pub fn validate_endpoint(endpoint: &str) -> Result<(&str, u16), &'static str> {
     }
 
     // 禁止特殊字符
-    if endpoint.contains(|c: char| c == '\n' || c == '\r' || c == '\0' || c == '"' || c == '\'') {
+    if endpoint.contains(['\n', '\r', '\0', '"', '\'']) {
         return Err("Invalid characters in endpoint");
     }
 
@@ -160,7 +160,7 @@ pub fn validate_endpoint(endpoint: &str) -> Result<(&str, u16), &'static str> {
 
 /// 验证 MTU 范围
 pub fn validate_mtu(mtu: u16) -> Result<(), &'static str> {
-    if mtu < 576 || mtu > 9000 {
+    if !(576..=9000).contains(&mtu) {
         return Err("MTU must be between 576 and 9000");
     }
     Ok(())

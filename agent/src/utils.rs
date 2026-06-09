@@ -9,8 +9,10 @@ use axum::{
     response::Response,
 };
 
+use std::sync::Arc;
+
 use crate::config::Config;
-use shared::AppError;
+use shared::{AppError, validation::validate_asn};
 
 /// 命令执行结果
 #[derive(Debug)]
@@ -60,11 +62,11 @@ pub async fn run_cmd(config: &Config, bin: &str, args: &[&str]) -> CmdOutput {
 
 /// 认证中间件
 pub async fn auth_middleware(
-    State(config): State<Config>,
+    State(config): State<Arc<Config>>,
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    verify_token(&request.headers(), &config)?;
+    verify_token(request.headers(), &config)?;
     Ok(next.run(request).await)
 }
 
@@ -103,7 +105,7 @@ pub fn parse_asn_header(headers: &HeaderMap) -> Result<u32, AppError> {
     if asn == 0 {
         return Err(AppError::BadRequest("invalid ASN".into()));
     }
-    // validate_asn(asn).map_err(|e| AppError::BadRequest(e.into()))?;
+    validate_asn(asn).map_err(|e| AppError::BadRequest(e.into()))?;
 
     Ok(asn)
 }

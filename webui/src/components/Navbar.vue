@@ -4,24 +4,21 @@ import { ref, onMounted, watch } from 'vue'
 import { checkAdmin } from '../api'
 
 const authStore = useAuthStore()
-
-// 主题切换
 const isDark = ref(false)
-
-// 管理员状态
 const isAdmin = ref(false)
 
 onMounted(async () => {
+  // 初始化主题
   const savedTheme = localStorage.getItem('theme')
   if (savedTheme === 'dark') {
     isDark.value = true
-    document.documentElement.setAttribute('data-bs-theme', 'dark')
+    document.documentElement.setAttribute('data-theme', 'dark')
   } else if (savedTheme === 'light') {
     isDark.value = false
-    document.documentElement.setAttribute('data-bs-theme', 'light')
+    document.documentElement.setAttribute('data-theme', 'light')
   } else {
     isDark.value = window.matchMedia('(prefers-color-scheme: dark)').matches
-    document.documentElement.setAttribute('data-bs-theme', isDark.value ? 'dark' : 'light')
+    document.documentElement.setAttribute('data-theme', isDark.value ? 'dark' : 'light')
   }
 
   // 检查管理员状态
@@ -36,7 +33,7 @@ onMounted(async () => {
 })
 
 watch(isDark, (val) => {
-  document.documentElement.setAttribute('data-bs-theme', val ? 'dark' : 'light')
+  document.documentElement.setAttribute('data-theme', val ? 'dark' : 'light')
   localStorage.setItem('theme', val ? 'dark' : 'light')
 })
 
@@ -50,24 +47,22 @@ function handleLogin() {
 </script>
 
 <template>
-  <nav class="navbar navbar-expand-lg sticky-top" :class="isDark ? 'navbar-dark bg-dark' : 'navbar-light bg-white border-bottom'">
-    <div class="container">
-      <router-link to="/" class="navbar-brand fw-bold">
+  <nav class="navbar">
+    <div class="navbar-inner">
+      <router-link to="/" class="brand">
         DAPRS
       </router-link>
 
-      <div class="navbar-nav ms-auto d-flex flex-row align-items-center">
-        <!-- 外部链接 -->
-        <a href="https://lg-dn42.vconet.top/" target="_blank" class="nav-link small me-2" :class="isDark ? 'text-light' : 'text-muted'">
+      <div class="navbar-links">
+        <a href="https://lg-dn42.vconet.top/" target="_blank" class="nav-link-external">
           Looking Glass
         </a>
-        <a href="https://flap-dn42.vconet.top/" target="_blank" class="nav-link small me-3" :class="isDark ? 'text-light' : 'text-muted'">
+        <a href="https://flap-dn42.vconet.top/" target="_blank" class="nav-link-external">
           FlapAlerted
         </a>
 
-        <!-- 主题切换 -->
-        <button @click="toggleTheme" class="btn btn-link nav-link p-0 me-2" :title="isDark ? 'Switch to light mode' : 'Switch to dark mode'">
-          <svg v-if="isDark" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <button @click="toggleTheme" class="theme-toggle" :title="isDark ? 'Switch to light mode' : 'Switch to dark mode'">
+          <svg v-if="isDark" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="5"></circle>
             <line x1="12" y1="1" x2="12" y2="3"></line>
             <line x1="12" y1="21" x2="12" y2="23"></line>
@@ -78,25 +73,25 @@ function handleLogin() {
             <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
             <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
           </svg>
-          <svg v-else xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <svg v-else xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
           </svg>
         </button>
 
         <template v-if="authStore.isLoggedIn">
-          <span class="navbar-text me-2 small" :class="isDark ? 'text-light' : 'text-muted'">
-            AS{{ authStore.asn }}
-          </span>
-          <router-link v-if="isAdmin" to="/admin" class="nav-link">
-            <i class="bi bi-shield-check"></i>
+          <span class="user-asn">AS{{ authStore.asn }}</span>
+          <router-link v-if="isAdmin" to="/admin" class="nav-link-icon" title="Admin">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+            </svg>
           </router-link>
           <router-link to="/tools" class="nav-link">Tools</router-link>
-          <button @click="authStore.logoutUser" class="btn btn-outline-primary btn-sm ms-2">
+          <button @click="authStore.logoutUser" class="btn-logout">
             Logout
           </button>
         </template>
         <template v-else>
-          <button @click="handleLogin" class="btn btn-primary btn-sm">
+          <button @click="handleLogin" class="btn-login">
             Login
           </button>
         </template>
@@ -106,17 +101,153 @@ function handleLogin() {
 </template>
 
 <style scoped>
-.navbar-brand {
-  font-weight: 600;
-  letter-spacing: 0.05em;
+.navbar {
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-color);
+  padding: 0 var(--space-lg);
+  position: sticky;
+  top: 0;
+  z-index: 100;
 }
 
-.btn-link {
+.navbar-inner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 56px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.brand {
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: var(--text-primary);
   text-decoration: none;
-  opacity: 0.7;
+  letter-spacing: 0.02em;
 }
 
-.btn-link:hover {
-  opacity: 1;
+.brand:hover {
+  color: var(--accent);
+}
+
+.navbar-links {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.nav-link-external {
+  color: var(--text-tertiary);
+  font-size: 0.875rem;
+  text-decoration: none;
+  transition: color var(--transition-fast);
+}
+
+.nav-link-external:hover {
+  color: var(--text-secondary);
+}
+
+.nav-link {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  text-decoration: none;
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.nav-link:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.nav-link-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-xs);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.nav-link-icon:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-xs);
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+
+.theme-toggle:hover {
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+}
+
+.user-asn {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-full);
+}
+
+.btn-login {
+  padding: var(--space-sm) var(--space-md);
+  background: var(--accent);
+  color: var(--text-inverse);
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.btn-login:hover {
+  background: var(--accent-hover);
+}
+
+.btn-logout {
+  padding: var(--space-sm) var(--space-md);
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.btn-logout:hover {
+  border-color: var(--text-tertiary);
+  color: var(--text-primary);
+}
+
+@media (max-width: 768px) {
+  .navbar {
+    padding: 0 var(--space-md);
+  }
+
+  .nav-link-external {
+    display: none;
+  }
+
+  .navbar-links {
+    gap: var(--space-sm);
+  }
 }
 </style>

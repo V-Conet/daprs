@@ -2,13 +2,16 @@
 //!
 //! 提供网络诊断命令（ping, traceroute, dig 等）的执行功能。
 
-use std::net::{IpAddr, Ipv6Addr};
+use std::{
+    net::{IpAddr, Ipv6Addr},
+    sync::Arc,
+};
 
 use axum::{Json, extract::State};
 
 use crate::config::Config;
 use crate::utils::run_cmd;
-use shared::{AppError, Cmd, QueryType};
+use shared::{AppError, Cmd, IpVersion, QueryType};
 
 /// 禁止的字符（命令注入防护）
 const FORBIDDEN_CHARS: &[char] = &[
@@ -86,7 +89,7 @@ fn bad(msg: &str) -> AppError {
 
 // API Handler
 pub async fn cmd_handler(
-    State(cfg): State<Config>,
+    State(cfg): State<Arc<Config>>,
     Json(cmd): Json<Cmd>,
 ) -> Result<String, AppError> {
     match cmd {
@@ -127,7 +130,7 @@ pub async fn cmd_handler(
 // Command Handlers
 async fn handle_ping(
     cfg: &Config,
-    protocol: Option<u16>,
+    protocol: Option<IpVersion>,
     count: Option<u16>,
     size: Option<u16>,
     dfrag: Option<bool>,
@@ -149,11 +152,8 @@ async fn handle_ping(
     if dfrag.unwrap_or(false) {
         args.push("-F".into());
     }
-    match protocol {
-        Some(4) => args.push("-4".into()),
-        Some(6) => args.push("-6".into()),
-        Some(_) => return Err(bad("invalid protocol")),
-        None => {}
+    if let Some(version) = protocol {
+        args.push(version.cli_arg().into());
     }
     args.push(target.to_lowercase());
 
@@ -162,17 +162,14 @@ async fn handle_ping(
 
 async fn handle_traceroute(
     cfg: &Config,
-    protocol: Option<u16>,
+    protocol: Option<IpVersion>,
     target: String,
 ) -> Result<String, AppError> {
     validate_target(&target)?;
 
     let mut args: Vec<&str> = vec!["-q1", "-w1"];
-    match protocol {
-        Some(4) => args.push("-4"),
-        Some(6) => args.push("-6"),
-        Some(_) => return Err(bad("invalid protocol")),
-        None => {}
+    if let Some(version) = protocol {
+        args.push(version.cli_arg());
     }
     args.push(&target);
 
@@ -205,7 +202,7 @@ async fn handle_dig(
 
 async fn handle_tcping(
     cfg: &Config,
-    protocol: Option<u16>,
+    protocol: Option<IpVersion>,
     target: String,
     port: u16,
     count: Option<u16>,
@@ -221,11 +218,8 @@ async fn handle_tcping(
         timeout.unwrap_or(3).to_string(),
     ];
 
-    match protocol {
-        Some(4) => args.push("-4".into()),
-        Some(6) => args.push("-6".into()),
-        Some(_) => return Err(bad("invalid protocol")),
-        None => {}
+    if let Some(version) = protocol {
+        args.push(version.cli_arg().into());
     }
 
     args.push(target);
@@ -236,7 +230,7 @@ async fn handle_tcping(
 
 async fn handle_route(
     cfg: &Config,
-    _protocol: Option<u16>,
+    _protocol: Option<IpVersion>,
     target: String,
 ) -> Result<String, AppError> {
     validate_target(&target)?;
@@ -251,7 +245,7 @@ async fn handle_route(
 
 async fn handle_path(
     cfg: &Config,
-    _protocol: Option<u16>,
+    _protocol: Option<IpVersion>,
     target: String,
 ) -> Result<String, AppError> {
     validate_target(&target)?;
@@ -266,10 +260,10 @@ async fn handle_path(
     if !output.text.is_empty() {
         let mut path_lines = Vec::new();
         for line in output.text.lines() {
-            if line.contains("bgp_path:") {
-                if let Some(path) = line.split(':').nth(1) {
-                    path_lines.push(path.trim());
-                }
+            if line.contains("bgp_path:")
+                && let Some(path) = line.split(':').nth(1)
+            {
+                path_lines.push(path.trim());
             }
         }
 
