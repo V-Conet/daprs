@@ -1,6 +1,7 @@
 //! API Handler 模块
 //!
 //! 处理前端 API 请求
+//! 鉴权 → 仓储层 → agent_client → 审计
 
 use std::collections::BTreeMap;
 
@@ -9,26 +10,47 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
 };
-use serde::{Deserialize, Serialize};
+use reqwest::Method;
 use shared::{
-    AppError, NodeActionRequest, PeeringPayload, RemoveRequest, validation::validate_asn,
+    ActionResult, ActionType, AppError, NodeActionRequest, PeeringPayload, RemoveRequest,
+    validation::validate_asn,
 };
 
 use crate::{
-    api::oauth::{get_session_asn, is_session_admin, persist_json, require_admin, require_session},
-    api::{FrontendAgentConfig, NodeAgentConfig},
-    audit,
+    agent_client,
+    api::{
+        AdminDeleteRequest, AdminPeerRequest, NodeAgentConfig, PendingRequest,
+        oauth::{get_session_asn, is_session_admin, require_admin, require_session},
+    },
     config::AppState,
+    db::{self, peer_cache, peering_requests},
 };
 
-const PEERING_QUEUE: &str = "peering_queue";
-const MODIFY_QUEUE: &str = "modify_queue";
-const REMOVE_QUEUE: &str = "remove_queue";
-const PENDING_QUEUE: &str = "pending_queue";
-const PENDING_TTL_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
+const PENDING_TTL_SECS: i64 = 7 * 24 * 60 * 60; // 7 days
+const AUDIT_DEFAULT_LIMIT: i64 = 1000;
+const AUDIT_DEFAULT_OFFSET: i64 = 0;
 
-fn log_audit_result(result: Result<(), AppError>) {
-    if let Err(e) = result {
+/// 记录审计日志（失败仅记日志，不影响主流程）
+async fn record_audit(
+    state: &AppState,
+    actor_asn: u32,
+    action: ActionType,
+    target_asn: u32,
+    node: &str,
+    result: ActionResult,
+) {
+    let id = uuid::Uuid::new_v4().to_string();
+    if let Err(e) = db::audit::insert(
+        &state.pool,
+        &id,
+        actor_asn as i64,
+        action,
+        target_asn as i64,
+        node,
+        &result,
+    )
+    .await
+    {
         tracing::error!("failed to write audit log: {e}");
     }
 }
@@ -44,17 +66,10 @@ pub async fn get_nodes(
     let mut nodes = BTreeMap::new();
 
     for server in &state.config.server.servers {
-        let (conf, online, error) =
-            fetch_agent_config(&client, &state.config.server.api_token, &server.address).await;
-        nodes.insert(
-            server.name.clone(),
-            NodeAgentConfig {
-                address: server.address.clone(),
-                online,
-                error,
-                conf,
-            },
-        );
+        let conf =
+            agent_client::fetch_node_agent_config(&client, &state.config.server.api_token, server)
+                .await;
+        nodes.insert(server.name.clone(), conf);
     }
 
     Ok(Json(nodes))
@@ -70,8 +85,8 @@ pub async fn post_peering(
     headers: HeaderMap,
     Json(action): Json<NodeActionRequest<PeeringPayload>>,
 ) -> Result<StatusCode, AppError> {
-    let session = require_session(&state, &headers)?;
-    let asn = get_session_asn(&session);
+    let ctx = require_session(&state, &headers).await?;
+    let asn = get_session_asn(&ctx);
 
     // 获取节点配置，检查是否需要审核
     let server = state
@@ -82,39 +97,52 @@ pub async fn post_peering(
         .find(|s| s.name == action.node)
         .ok_or(AppError::BadRequest("node not found".into()))?;
 
-    let (node_config, _online, _error) =
-        fetch_agent_config(&state.http, &state.config.server.api_token, &server.address).await;
+    let (node_config, _online, _error) = agent_client::fetch_agent_config(
+        &state.http,
+        &state.config.server.api_token,
+        &server.address,
+    )
+    .await;
 
-    if node_config.is_verify {
-        let request_id = uuid::Uuid::new_v4().to_string();
-        let pending = PendingRequest {
-            id: request_id.clone(),
-            node: action.node.clone(),
+    let require_approval = node_config.is_verify;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let payload_json = serde_json::to_string(&action.payload)
+        .map_err(|e| AppError::InternalError(format!("payload encode: {e}")))?;
+    let expires_at = if require_approval {
+        Some(db::now_unix_secs() + PENDING_TTL_SECS)
+    } else {
+        None
+    };
+
+    peering_requests::create(
+        &state.pool,
+        &request_id,
+        asn as i64,
+        &action.node,
+        peering_requests::Action::Create,
+        require_approval,
+        Some(&payload_json),
+        expires_at,
+    )
+    .await?;
+
+    if require_approval {
+        record_audit(
+            &state,
             asn,
-            payload: action.payload,
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        };
-        persist_json(&state.db, PENDING_QUEUE, &request_id, &pending)?;
-        audit::log_operation(
-            &state.db,
-            asn,
-            shared::ActionType::Create,
+            ActionType::Create,
             asn,
             &action.node,
-            shared::ActionResult::Success,
-        )?;
+            ActionResult::Success,
+        )
+        .await;
         return Ok(StatusCode::ACCEPTED);
     }
 
-    persist_json(&state.db, PEERING_QUEUE, &action.node, &action)?;
-
-    let result = dispatch_to_agent(
+    let result = agent_client::dispatch_to_agent(
         &state,
         &action.node,
-        reqwest::Method::POST,
+        Method::POST,
         "/create_peer",
         Some(&action.payload),
         asn,
@@ -122,25 +150,31 @@ pub async fn post_peering(
     .await;
 
     match &result {
-        Ok(_) => {
-            audit::log_operation(
-                &state.db,
+        Ok(()) => {
+            peering_requests::mark_dispatched(&state.pool, &request_id).await?;
+            peering_requests::mark_succeeded(&state.pool, &request_id).await?;
+            peer_cache::upsert_active(&state.pool, asn as i64, &action.node, &payload_json).await?;
+            record_audit(
+                &state,
                 asn,
-                shared::ActionType::Create,
+                ActionType::Create,
                 asn,
                 &action.node,
-                shared::ActionResult::Success,
-            )?;
+                ActionResult::Success,
+            )
+            .await;
         }
         Err(e) => {
-            log_audit_result(audit::log_operation(
-                &state.db,
+            peering_requests::mark_failed(&state.pool, &request_id, &e.to_string()).await?;
+            record_audit(
+                &state,
                 asn,
-                shared::ActionType::Create,
+                ActionType::Create,
                 asn,
                 &action.node,
-                shared::ActionResult::Failed(e.to_string()),
-            ));
+                ActionResult::Failed(e.to_string()),
+            )
+            .await;
         }
     }
 
@@ -155,16 +189,30 @@ pub async fn post_modify(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(action): Json<NodeActionRequest<PeeringPayload>>,
-) -> Result<axum::http::StatusCode, AppError> {
-    let session = require_session(&state, &headers)?;
-    let asn = get_session_asn(&session);
+) -> Result<StatusCode, AppError> {
+    let ctx = require_session(&state, &headers).await?;
+    let asn = get_session_asn(&ctx);
 
-    persist_json(&state.db, MODIFY_QUEUE, &action.node, &action)?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let payload_json = serde_json::to_string(&action.payload)
+        .map_err(|e| AppError::InternalError(format!("payload encode: {e}")))?;
 
-    let result = dispatch_to_agent(
+    peering_requests::create(
+        &state.pool,
+        &request_id,
+        asn as i64,
+        &action.node,
+        peering_requests::Action::Modify,
+        false,
+        Some(&payload_json),
+        None,
+    )
+    .await?;
+
+    let result = agent_client::dispatch_to_agent(
         &state,
         &action.node,
-        reqwest::Method::POST,
+        Method::POST,
         "/modify_peer",
         Some(&action.payload),
         asn,
@@ -172,25 +220,32 @@ pub async fn post_modify(
     .await;
 
     match &result {
-        Ok(_) => {
-            audit::log_operation(
-                &state.db,
+        Ok(()) => {
+            peering_requests::mark_dispatched(&state.pool, &request_id).await?;
+            peering_requests::mark_succeeded(&state.pool, &request_id).await?;
+            peer_cache::update_payload(&state.pool, asn as i64, &action.node, &payload_json)
+                .await?;
+            record_audit(
+                &state,
                 asn,
-                shared::ActionType::Modify,
+                ActionType::Modify,
                 asn,
                 &action.node,
-                shared::ActionResult::Success,
-            )?;
+                ActionResult::Success,
+            )
+            .await;
         }
         Err(e) => {
-            log_audit_result(audit::log_operation(
-                &state.db,
+            peering_requests::mark_failed(&state.pool, &request_id, &e.to_string()).await?;
+            record_audit(
+                &state,
                 asn,
-                shared::ActionType::Modify,
+                ActionType::Modify,
                 asn,
                 &action.node,
-                shared::ActionResult::Failed(e.to_string()),
-            ));
+                ActionResult::Failed(e.to_string()),
+            )
+            .await;
         }
     }
 
@@ -206,15 +261,26 @@ pub async fn post_remove(
     headers: HeaderMap,
     Json(req): Json<RemoveRequest>,
 ) -> Result<StatusCode, AppError> {
-    let session = require_session(&state, &headers)?;
-    let asn = get_session_asn(&session);
+    let ctx = require_session(&state, &headers).await?;
+    let asn = get_session_asn(&ctx);
 
-    persist_json(&state.db, REMOVE_QUEUE, &req.node, &req)?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+    peering_requests::create(
+        &state.pool,
+        &request_id,
+        asn as i64,
+        &req.node,
+        peering_requests::Action::Delete,
+        false,
+        None,
+        None,
+    )
+    .await?;
 
-    let result = dispatch_to_agent(
+    let result = agent_client::dispatch_to_agent(
         &state,
         &req.node,
-        reqwest::Method::DELETE,
+        Method::DELETE,
         "/delete_peer",
         None,
         asn,
@@ -222,28 +288,31 @@ pub async fn post_remove(
     .await;
 
     match &result {
-        Ok(_) => {
-            let _ = remove_from_queue(&state.db, PEERING_QUEUE, &req.node);
-            let _ = remove_from_queue(&state.db, MODIFY_QUEUE, &req.node);
-            let _ = remove_from_queue(&state.db, REMOVE_QUEUE, &req.node);
-            log_audit_result(audit::log_operation(
-                &state.db,
+        Ok(()) => {
+            peering_requests::mark_dispatched(&state.pool, &request_id).await?;
+            peering_requests::mark_succeeded(&state.pool, &request_id).await?;
+            peer_cache::mark_removed(&state.pool, asn as i64, &req.node).await?;
+            record_audit(
+                &state,
                 asn,
-                shared::ActionType::Delete,
+                ActionType::Delete,
                 asn,
                 &req.node,
-                shared::ActionResult::Success,
-            ));
+                ActionResult::Success,
+            )
+            .await;
         }
         Err(e) => {
-            log_audit_result(audit::log_operation(
-                &state.db,
+            peering_requests::mark_failed(&state.pool, &request_id, &e.to_string()).await?;
+            record_audit(
+                &state,
                 asn,
-                shared::ActionType::Delete,
+                ActionType::Delete,
                 asn,
                 &req.node,
-                shared::ActionResult::Failed(e.to_string()),
-            ));
+                ActionResult::Failed(e.to_string()),
+            )
+            .await;
         }
     }
 
@@ -251,44 +320,64 @@ pub async fn post_remove(
     Ok(StatusCode::OK)
 }
 
-/// 获取 Peering 队列
+/// 获取当前用户的 Peering 列表（来自 peer_cache，非权威）
 pub async fn get_peers(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<NodeActionRequest<PeeringPayload>>>, AppError> {
-    let peers = read_all_from_queue(&state.db, PEERING_QUEUE)?;
+    let ctx = require_session(&state, &headers).await?;
+    let asn = get_session_asn(&ctx);
+
+    let rows = peer_cache::list_active_for_user(&state.pool, asn as i64).await?;
+    let peers = rows
+        .into_iter()
+        .filter_map(|r| match r.payload_value() {
+            Ok(payload) => Some(NodeActionRequest {
+                node: r.node,
+                payload,
+            }),
+            Err(e) => {
+                tracing::error!("skip corrupt peer_cache row: {e}");
+                None
+            }
+        })
+        .collect();
     Ok(Json(peers))
 }
 
-/// 删除 Peering 队列项
+/// 取消 Peering 队列项
 pub async fn delete_peering_queue(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(node): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_session(&state, &headers)?;
-    remove_from_queue(&state.db, PEERING_QUEUE, &node)?;
+    let ctx = require_session(&state, &headers).await?;
+    let asn = get_session_asn(&ctx);
+    peering_requests::cancel_for_user_node(&state.pool, asn as i64, &node).await?;
     Ok(StatusCode::OK)
 }
 
-/// 删除 Modify 队列项
+/// 取消 Modify 队列项
 pub async fn delete_modify_queue(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(node): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_session(&state, &headers)?;
-    remove_from_queue(&state.db, MODIFY_QUEUE, &node)?;
+    let ctx = require_session(&state, &headers).await?;
+    let asn = get_session_asn(&ctx);
+    peering_requests::cancel_for_user_node(&state.pool, asn as i64, &node).await?;
     Ok(StatusCode::OK)
 }
 
-/// 删除 Remove 队列项
+/// 取消 Remove 队列项
 pub async fn delete_remove_queue(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(node): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    require_session(&state, &headers)?;
-    remove_from_queue(&state.db, REMOVE_QUEUE, &node)?;
+    let ctx = require_session(&state, &headers).await?;
+    let asn = get_session_asn(&ctx);
+    peering_requests::cancel_for_user_node(&state.pool, asn as i64, &node).await?;
     Ok(StatusCode::OK)
 }
 
@@ -300,318 +389,48 @@ pub async fn post_cmd(
     headers: HeaderMap,
     Json(action): Json<NodeActionRequest<serde_json::Value>>,
 ) -> Result<String, AppError> {
-    let session = require_session(&state, &headers)?;
-    let _asn = get_session_asn(&session);
+    let _ctx = require_session(&state, &headers).await?;
 
-    let server = state
-        .config
-        .server
-        .servers
-        .iter()
-        .find(|s| s.name == action.node)
-        .ok_or(AppError::BadRequest("node not found".into()))?;
-
-    let url = normalize_agent_base_url(&server.address) + "/cmd";
-
-    let resp = state
-        .http
-        .clone()
-        .post(&url)
-        .header("x-api-token", &state.config.server.api_token)
-        .json(&action.payload)
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!("cmd request failed: {e}");
-            AppError::BadGateway
-        })?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        tracing::error!("agent cmd returned {status}: {body}");
-        let msg = sanitize_agent_error(&body);
-        return Err(AppError::BadRequest(format!("agent error: {msg}")));
-    }
-
-    resp.text().await.map_err(|e| {
-        tracing::error!("failed to read cmd response: {e}");
-        AppError::BadGateway
-    })
+    agent_client::proxy_to_agent_text(
+        &state,
+        &action.node,
+        Method::POST,
+        "/cmd",
+        None,
+        Some(&action.payload),
+    )
+    .await
 }
 
 /// 查询 Peer 信息
 ///
-/// 获取指定节点上的 Peer 配置和状态
+/// 获取指定节点上的 Peer 配置和状态（回源 agent，权威）
 pub async fn get_peer_info(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(node): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let session = require_session(&state, &headers)?;
-    let asn = get_session_asn(&session);
+    let ctx = require_session(&state, &headers).await?;
+    let asn = get_session_asn(&ctx);
 
-    let server = state
-        .config
-        .server
-        .servers
-        .iter()
-        .find(|s| s.name == node)
-        .ok_or(AppError::BadRequest("node not found".into()))?;
-
-    let url = normalize_agent_base_url(&server.address) + "/peer_info";
-
-    let resp = state
-        .http
-        .clone()
-        .get(&url)
-        .header("x-api-token", &state.config.server.api_token)
-        .header("asn", asn.to_string())
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!("peer_info request failed: {e}");
-            AppError::BadGateway
-        })?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        tracing::error!("agent peer_info returned {status}: {body}");
-        let msg = sanitize_agent_error(&body);
-        return Err(AppError::BadRequest(format!("agent error: {msg}")));
-    }
-
-    let json: serde_json::Value = resp.json().await.map_err(|e| {
-        tracing::error!("failed to parse peer_info response: {e}");
-        AppError::BadGateway
-    })?;
+    let json =
+        agent_client::proxy_to_agent(&state, &node, Method::GET, "/peer_info", Some(asn), None)
+            .await?;
     Ok(Json(json))
 }
 
-/// 向 Agent 发送请求
-async fn dispatch_to_agent(
-    state: &AppState,
-    node: &str,
-    method: reqwest::Method,
-    path: &str,
-    body: Option<&PeeringPayload>,
-    asn: u32,
-) -> Result<(), AppError> {
-    let server = state
-        .config
-        .server
-        .servers
-        .iter()
-        .find(|s| s.name == node)
-        .ok_or(AppError::BadRequest("node not found".into()))?;
-
-    let url = normalize_agent_base_url(&server.address) + path;
-
-    let mut req = state
-        .http
-        .clone()
-        .request(method, url)
-        .header("x-api-token", &state.config.server.api_token)
-        .header("asn", asn.to_string());
-
-    if let Some(b) = body {
-        req = req.json(b);
-    }
-
-    let resp = req.send().await.map_err(|e| {
-        tracing::error!("agent request failed: {e}");
-        AppError::BadGateway
-    })?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        tracing::error!("agent returned {status}: {body}");
-        let msg = sanitize_agent_error(&body);
-        return Err(AppError::BadRequest(format!("agent error: {msg}")));
-    }
-    Ok(())
-}
-
-/// 移除 Agent 错误信息
-///
-/// 移除可能的敏感信息：
-/// - 公网 IP 地址
-/// - 文件系统路径
-/// - WireGuard 密钥
-fn sanitize_agent_error(error: &str) -> String {
-    let error = error.trim();
-    if error.is_empty() {
-        return "unknown error".into();
-    }
-
-    // 尝试从 JSON 提取错误消息
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(error)
-        && let Some(msg) = json.get("error").and_then(|v| v.as_str())
-    {
-        return sanitize_sensitive_info(msg);
-    }
-
-    sanitize_sensitive_info(error)
-}
-
-/// 移除敏感信息
-fn sanitize_sensitive_info(text: &str) -> String {
-    let mut result = text.to_string();
-
-    // 隐藏公网 IPv4 (非 DN42 范围)
-    let ipv4_re = regex::Regex::new(r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap();
-    result = ipv4_re
-        .replace_all(&result, |caps: &regex::Captures| {
-            let ip = &caps[0];
-            // DN42 范围: 172.20.0.0/14, 10.0.0.0/8 (部分)
-            if ip.starts_with("172.2") || ip.starts_with("10.") {
-                ip.to_string()
-            } else {
-                "[REDACTED]".to_string()
-            }
-        })
-        .to_string();
-
-    // 隐藏公网 IPv6 (非 DN42/ULA 范围)
-    let ipv6_re = regex::Regex::new(r"\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b").unwrap();
-    result = ipv6_re
-        .replace_all(&result, |caps: &regex::Captures| {
-            let ip = &caps[0];
-            // DN42 ULA: fd00::/8, Link-local: fe80::/10
-            if ip.starts_with("fd") || ip.starts_with("fe80") {
-                ip.to_string()
-            } else {
-                "[REDACTED]".to_string()
-            }
-        })
-        .to_string();
-
-    // 隐藏文件路径
-    let path_re = regex::Regex::new(r"/[\w/.-]+").unwrap();
-    result = path_re.replace_all(&result, "[PATH]").to_string();
-
-    // 隐藏 WireGuard 密钥 (44字符 base64)
-    let key_re = regex::Regex::new(r"\b[A-Za-z0-9+/]{42,44}=\b").unwrap();
-    result = key_re.replace_all(&result, "[KEY]").to_string();
-
-    // 限制长度
-    if result.len() > 300 {
-        result.truncate(300);
-        result.push_str("...");
-    }
-
-    result
-}
-
-/// 获取 Agent 配置
-async fn fetch_agent_config(
-    client: &reqwest::Client,
-    api_token: &str,
-    address: &str,
-) -> (FrontendAgentConfig, bool, Option<String>) {
-    let url = format!("{}/config", normalize_agent_base_url(address));
-    let resp = client
-        .get(&url)
-        .header("x-api-token", api_token)
-        .send()
-        .await;
-
-    match resp {
-        Ok(r) if r.status().is_success() => match r.json::<FrontendAgentConfig>().await {
-            Ok(conf) => (conf, true, None),
-            Err(_) => (
-                FrontendAgentConfig::default(),
-                false,
-                Some("agent returned invalid config".to_string()),
-            ),
-        },
-        Ok(r) => (
-            FrontendAgentConfig::default(),
-            false,
-            Some(format!("agent returned status {}", r.status())),
-        ),
-        Err(_) => (
-            FrontendAgentConfig::default(),
-            false,
-            Some("agent unavailable".to_string()),
-        ),
-    }
-}
-
-/// 标准化 Agent URL
-fn normalize_agent_base_url(addr: &str) -> String {
-    let addr = addr.trim_end_matches('/');
-    if addr.starts_with("http://") || addr.starts_with("https://") {
-        addr.to_string()
-    } else {
-        format!("http://{addr}")
-    }
-}
-
-/// 从队列中删除
-fn remove_from_queue(db: &sled::Db, tree_name: &str, node: &str) -> Result<(), AppError> {
-    let tree = db
-        .open_tree(tree_name)
-        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
-    tree.remove(node.as_bytes())
-        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
-    tree.flush()
-        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
-    Ok(())
-}
-
-/// 读取队列中所有项
-fn read_all_from_queue<T: serde::de::DeserializeOwned>(
-    db: &sled::Db,
-    tree_name: &str,
-) -> Result<Vec<T>, AppError> {
-    let tree = db
-        .open_tree(tree_name)
-        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
-
-    tree.iter()
-        .map(|item| {
-            item.map_err(|e| AppError::InternalError(format!("db error: {e}")))
-                .and_then(|(_, value)| {
-                    serde_json::from_slice::<T>(&value)
-                        .map_err(|e| AppError::InternalError(format!("json error: {e}")))
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()
-}
-
 // 管理员 API
-/// 待审核的 Peering 请求
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct PendingRequest {
-    /// 请求 ID
-    pub id: String,
-    /// 节点名称
-    pub node: String,
-    /// 请求者 ASN
-    pub asn: u32,
-    /// Peering 配置
-    pub payload: PeeringPayload,
-    /// 创建时间
-    pub created_at: u64,
-}
-
 /// 获取用户的待处理请求
 pub async fn get_my_pending_requests(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<PendingRequest>>, AppError> {
-    let session = require_session(&state, &headers)?;
-    let asn = get_session_asn(&session);
+    let ctx = require_session(&state, &headers).await?;
+    let asn = get_session_asn(&ctx);
 
-    cleanup_expired_pending(&state.db)?;
-    let mut requests = read_all_from_queue::<PendingRequest>(&state.db, PENDING_QUEUE)?;
-    let now = now_unix_secs();
-
-    requests.retain(|r| r.asn == asn && now.saturating_sub(r.created_at) < PENDING_TTL_SECS);
-    Ok(Json(requests))
+    peering_requests::cleanup_expired(&state.pool).await?;
+    let rows = peering_requests::list_pending_for_user(&state.pool, asn as i64).await?;
+    Ok(Json(rows.into_iter().filter_map(req_to_pending).collect()))
 }
 
 /// 获取待审核请求列表
@@ -619,10 +438,10 @@ pub async fn get_pending_requests(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<PendingRequest>>, AppError> {
-    let _session = require_admin(&state, &headers)?;
-    cleanup_expired_pending(&state.db)?;
-    let requests = read_all_from_queue::<PendingRequest>(&state.db, PENDING_QUEUE)?;
-    Ok(Json(requests))
+    require_admin(&state, &headers).await?;
+    peering_requests::cleanup_expired(&state.pool).await?;
+    let rows = peering_requests::list_all_pending(&state.pool).await?;
+    Ok(Json(rows.into_iter().filter_map(req_to_pending).collect()))
 }
 
 /// 批准 Peering 请求
@@ -631,45 +450,59 @@ pub async fn approve_request(
     headers: HeaderMap,
     Path(request_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let session = require_admin(&state, &headers)?;
-    let actor_asn = get_session_asn(&session);
+    let ctx = require_admin(&state, &headers).await?;
+    let actor_asn = get_session_asn(&ctx);
 
-    let pending = get_pending_request(&state.db, &request_id)?
+    let pending = peering_requests::get(&state.pool, &request_id)
+        .await?
         .ok_or(AppError::BadRequest("request not found".into()))?;
 
-    validate_asn(pending.asn).map_err(|e| AppError::BadRequest(e.into()))?;
+    let target_asn = pending.user_asn as u32;
+    let payload = pending
+        .payload_value()?
+        .ok_or(AppError::BadRequest("missing payload".into()))?;
+    let node = pending.node.clone();
 
-    let result = dispatch_to_agent(
+    validate_asn(target_asn).map_err(|e| AppError::BadRequest(e.into()))?;
+
+    let result = agent_client::dispatch_to_agent(
         &state,
-        &pending.node,
-        reqwest::Method::POST,
+        &node,
+        Method::POST,
         "/create_peer",
-        Some(&pending.payload),
-        pending.asn,
+        Some(&payload),
+        target_asn,
     )
     .await;
 
     match &result {
-        Ok(_) => {
-            remove_from_queue(&state.db, PENDING_QUEUE, &request_id)?;
-            audit::log_operation(
-                &state.db,
+        Ok(()) => {
+            peering_requests::mark_approved(&state.pool, &request_id, actor_asn as i64).await?;
+            peering_requests::mark_dispatched(&state.pool, &request_id).await?;
+            peering_requests::mark_succeeded(&state.pool, &request_id).await?;
+            let payload_json = serde_json::to_string(&payload)
+                .map_err(|e| AppError::InternalError(format!("payload encode: {e}")))?;
+            peer_cache::upsert_active(&state.pool, target_asn as i64, &node, &payload_json).await?;
+            record_audit(
+                &state,
                 actor_asn,
-                shared::ActionType::Approve,
-                pending.asn,
-                &pending.node,
-                shared::ActionResult::Success,
-            )?;
+                ActionType::Approve,
+                target_asn,
+                &node,
+                ActionResult::Success,
+            )
+            .await;
         }
         Err(e) => {
-            log_audit_result(audit::log_operation(
-                &state.db,
+            record_audit(
+                &state,
                 actor_asn,
-                shared::ActionType::Approve,
-                pending.asn,
-                &pending.node,
-                shared::ActionResult::Failed(e.to_string()),
-            ));
+                ActionType::Approve,
+                target_asn,
+                &node,
+                ActionResult::Failed(e.to_string()),
+            )
+            .await;
         }
     }
 
@@ -683,39 +516,40 @@ pub async fn reject_request(
     headers: HeaderMap,
     Path(request_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let session = require_admin(&state, &headers)?;
-    let actor_asn = get_session_asn(&session);
+    let ctx = require_admin(&state, &headers).await?;
+    let actor_asn = get_session_asn(&ctx);
 
-    let pending = get_pending_request(&state.db, &request_id)?
+    let pending = peering_requests::get(&state.pool, &request_id)
+        .await?
         .ok_or(AppError::BadRequest("request not found".into()))?;
 
-    remove_from_queue(&state.db, PENDING_QUEUE, &request_id)?;
+    peering_requests::mark_rejected(&state.pool, &request_id, actor_asn as i64).await?;
 
-    audit::log_operation(
-        &state.db,
+    record_audit(
+        &state,
         actor_asn,
-        shared::ActionType::Reject,
-        pending.asn,
+        ActionType::Reject,
+        pending.user_asn as u32,
         &pending.node,
-        shared::ActionResult::Success,
-    )?;
+        ActionResult::Success,
+    )
+    .await;
 
     Ok(StatusCode::OK)
 }
 
-/// 获取所有节点的 Peer 信息
+/// 获取所有节点的 Peer 信息（回源 agent，权威）
 pub async fn get_all_peers(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<BTreeMap<String, Vec<serde_json::Value>>>, AppError> {
-    let _session = require_admin(&state, &headers)?;
+    require_admin(&state, &headers).await?;
 
     let mut result = BTreeMap::new();
     let client = state.http.clone();
 
     for server in &state.config.server.servers {
-        // 获取该节点的所有 peer ASN 列表
-        let peers_url = normalize_agent_base_url(&server.address) + "/peers";
+        let peers_url = agent_client::normalize_agent_base_url(&server.address) + "/peers";
         let peers_resp = client
             .get(&peers_url)
             .header("x-api-token", &state.config.server.api_token)
@@ -735,7 +569,7 @@ pub async fn get_all_peers(
 
         let mut peer_infos = Vec::new();
         for asn in asns {
-            let info_url = normalize_agent_base_url(&server.address) + "/peer_info";
+            let info_url = agent_client::normalize_agent_base_url(&server.address) + "/peer_info";
             let resp = client
                 .get(&info_url)
                 .header("x-api-token", &state.config.server.api_token)
@@ -770,46 +604,77 @@ pub async fn admin_modify_peer(
     headers: HeaderMap,
     Json(req): Json<AdminPeerRequest>,
 ) -> Result<StatusCode, AppError> {
-    let session = require_admin(&state, &headers)?;
-    let actor_asn = get_session_asn(&session);
+    let ctx = require_admin(&state, &headers).await?;
+    let actor_asn = get_session_asn(&ctx);
 
     validate_asn(req.asn).map_err(|e| AppError::BadRequest(e.into()))?;
 
-    let result = dispatch_to_agent(
+    let payload_json = serde_json::to_string(&req.payload)
+        .map_err(|e| AppError::InternalError(format!("payload encode: {e}")))?;
+    let request_id = uuid::Uuid::new_v4().to_string();
+
+    let result = agent_client::dispatch_to_agent(
         &state,
         &req.node,
-        reqwest::Method::POST,
+        Method::POST,
         "/modify_peer",
         Some(&req.payload),
         req.asn,
     )
     .await;
 
-    match &result {
-        Ok(_) => {
-            audit::log_operation(
-                &state.db,
-                actor_asn,
-                shared::ActionType::Modify,
-                req.asn,
-                &req.node,
-                shared::ActionResult::Success,
-            )?;
-        }
-        Err(e) => {
-            log_audit_result(audit::log_operation(
-                &state.db,
-                actor_asn,
-                shared::ActionType::Modify,
-                req.asn,
-                &req.node,
-                shared::ActionResult::Failed(e.to_string()),
-            ));
-        }
-    }
+    let status = if result.is_ok() {
+        peering_requests::create_terminal(
+            &state.pool,
+            &request_id,
+            req.asn as i64,
+            &req.node,
+            peering_requests::Action::Modify,
+            Some(&payload_json),
+            peering_requests::Status::Succeeded,
+            Some(actor_asn as i64),
+            None,
+        )
+        .await?;
+        peer_cache::update_payload(&state.pool, req.asn as i64, &req.node, &payload_json).await?;
+        record_audit(
+            &state,
+            actor_asn,
+            ActionType::Modify,
+            req.asn,
+            &req.node,
+            ActionResult::Success,
+        )
+        .await;
+        StatusCode::OK
+    } else {
+        let err = result.as_ref().err().unwrap().to_string();
+        peering_requests::create_terminal(
+            &state.pool,
+            &request_id,
+            req.asn as i64,
+            &req.node,
+            peering_requests::Action::Modify,
+            Some(&payload_json),
+            peering_requests::Status::Failed,
+            Some(actor_asn as i64),
+            Some(&err),
+        )
+        .await?;
+        record_audit(
+            &state,
+            actor_asn,
+            ActionType::Modify,
+            req.asn,
+            &req.node,
+            ActionResult::Failed(err),
+        )
+        .await;
+        StatusCode::OK
+    };
 
     result?;
-    Ok(StatusCode::OK)
+    Ok(status)
 }
 
 /// 管理员删除任意 Peer
@@ -818,111 +683,75 @@ pub async fn admin_delete_peer(
     headers: HeaderMap,
     Json(req): Json<AdminDeleteRequest>,
 ) -> Result<StatusCode, AppError> {
-    let session = require_admin(&state, &headers)?;
-    let actor_asn = get_session_asn(&session);
+    let ctx = require_admin(&state, &headers).await?;
+    let actor_asn = get_session_asn(&ctx);
 
     validate_asn(req.asn).map_err(|e| AppError::BadRequest(e.into()))?;
 
-    let result = dispatch_to_agent(
+    let request_id = uuid::Uuid::new_v4().to_string();
+
+    let result = agent_client::dispatch_to_agent(
         &state,
         &req.node,
-        reqwest::Method::DELETE,
+        Method::DELETE,
         "/delete_peer",
         None,
         req.asn,
     )
     .await;
 
-    match &result {
-        Ok(_) => {
-            audit::log_operation(
-                &state.db,
-                actor_asn,
-                shared::ActionType::Delete,
-                req.asn,
-                &req.node,
-                shared::ActionResult::Success,
-            )?;
-        }
-        Err(e) => {
-            log_audit_result(audit::log_operation(
-                &state.db,
-                actor_asn,
-                shared::ActionType::Delete,
-                req.asn,
-                &req.node,
-                shared::ActionResult::Failed(e.to_string()),
-            ));
-        }
-    }
+    let status = if result.is_ok() {
+        peering_requests::create_terminal(
+            &state.pool,
+            &request_id,
+            req.asn as i64,
+            &req.node,
+            peering_requests::Action::Delete,
+            None,
+            peering_requests::Status::Succeeded,
+            Some(actor_asn as i64),
+            None,
+        )
+        .await?;
+        peer_cache::mark_removed(&state.pool, req.asn as i64, &req.node).await?;
+        record_audit(
+            &state,
+            actor_asn,
+            ActionType::Delete,
+            req.asn,
+            &req.node,
+            ActionResult::Success,
+        )
+        .await;
+        StatusCode::OK
+    } else {
+        let err = result.as_ref().err().unwrap().to_string();
+        peering_requests::create_terminal(
+            &state.pool,
+            &request_id,
+            req.asn as i64,
+            &req.node,
+            peering_requests::Action::Delete,
+            None,
+            peering_requests::Status::Failed,
+            Some(actor_asn as i64),
+            Some(&err),
+        )
+        .await?;
+        record_audit(
+            &state,
+            actor_asn,
+            ActionType::Delete,
+            req.asn,
+            &req.node,
+            ActionResult::Failed(err),
+        )
+        .await;
+        StatusCode::OK
+    };
 
     result?;
-    Ok(StatusCode::OK)
-}
-
-/// 管理员 Peer 修改请求
-#[derive(Deserialize)]
-pub struct AdminPeerRequest {
-    pub node: String,
-    pub asn: u32,
-    pub payload: PeeringPayload,
-}
-
-/// 管理员删除请求
-#[derive(Deserialize)]
-pub struct AdminDeleteRequest {
-    pub node: String,
-    pub asn: u32,
-}
-
-fn now_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-}
-
-fn cleanup_expired_pending(db: &sled::Db) -> Result<(), AppError> {
-    let tree = db
-        .open_tree(PENDING_QUEUE)
-        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
-    let now = now_unix_secs();
-    let mut removed = false;
-
-    for item in tree.iter() {
-        let (key, value) = item.map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
-        let Ok(request) = serde_json::from_slice::<PendingRequest>(&value) else {
-            continue;
-        };
-        if now.saturating_sub(request.created_at) >= PENDING_TTL_SECS {
-            tree.remove(key)
-                .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
-            removed = true;
-        }
-    }
-
-    if removed {
-        tree.flush()
-            .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
-    }
-
-    Ok(())
-}
-
-/// 获取单个待审核请求
-fn get_pending_request(db: &sled::Db, id: &str) -> Result<Option<PendingRequest>, AppError> {
-    let tree = db
-        .open_tree(PENDING_QUEUE)
-        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
-
-    match tree.get(id.as_bytes()) {
-        Ok(Some(value)) => {
-            let req: PendingRequest = serde_json::from_slice(&value)
-                .map_err(|e| AppError::InternalError(format!("json error: {e}")))?;
-            Ok(Some(req))
-        }
-        _ => Ok(None),
-    }
+    Ok(status)
 }
 
 /// 检查是否为管理员
@@ -930,15 +759,39 @@ pub async fn check_admin(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<bool>, AppError> {
-    let session = require_session(&state, &headers)?;
-    Ok(Json(is_session_admin(&session)))
+    let ctx = require_session(&state, &headers).await?;
+    Ok(Json(is_session_admin(&state, &ctx)))
 }
 
+/// 获取审计日志（分页，默认最近 1000 条）
 pub async fn get_audit_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<shared::AuditLog>>, AppError> {
-    let _session = require_admin(&state, &headers)?;
-    let logs = audit::get_all_logs(&state.db)?;
+    require_admin(&state, &headers).await?;
+    let rows =
+        db::audit::list_paginated(&state.pool, AUDIT_DEFAULT_LIMIT, AUDIT_DEFAULT_OFFSET).await?;
+    let logs = rows
+        .into_iter()
+        .filter_map(|r| match r.to_audit_log() {
+            Ok(log) => Some(log),
+            Err(e) => {
+                tracing::error!("skip corrupt audit row: {e}");
+                None
+            }
+        })
+        .collect();
     Ok(Json(logs))
+}
+
+/// 将请求行转为 API 响应类型
+fn req_to_pending(r: peering_requests::PeeringRequest) -> Option<PendingRequest> {
+    let payload = r.payload_value().ok()??;
+    Some(PendingRequest {
+        id: r.id,
+        node: r.node,
+        asn: r.user_asn as u32,
+        payload,
+        created_at: r.created_at as u64,
+    })
 }

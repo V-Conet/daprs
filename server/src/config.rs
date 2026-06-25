@@ -8,8 +8,8 @@ use shared::{AgentNode, rate_limiter::RateLimitConfig};
 pub struct AppState {
     /// 配置
     pub config: Config,
-    /// 数据库
-    pub db: sled::Db,
+    /// 数据库连接池
+    pub pool: sqlx::SqlitePool,
     /// HTTP 客户端
     pub http: reqwest::Client,
 }

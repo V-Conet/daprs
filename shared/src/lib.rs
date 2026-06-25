@@ -545,6 +545,19 @@ pub enum ActionType {
     Delete,
 }
 
+impl ActionType {
+    /// 操作名称（小写字符串），适合入库与日志
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Approve => "approve",
+            Self::Reject => "reject",
+            Self::Modify => "modify",
+            Self::Delete => "delete",
+        }
+    }
+}
+
 /// 操作结果
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "lowercase")]

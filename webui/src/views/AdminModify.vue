@@ -387,7 +387,10 @@ function goBack() {
 }
 
 .toggle-item input {
-  margin-top: 2px;
+  width: 16px;
+  height: 16px;
+  margin-top: 5px;
+  flex-shrink: 0;
 }
 
 .toggle-content {

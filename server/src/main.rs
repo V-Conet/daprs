@@ -18,10 +18,11 @@ use crate::api::{handler, oauth};
 use crate::config::{AppState, Config};
 use shared::rate_limiter::{self, RateLimiter};
 
+mod agent_client;
 mod api;
-mod audit;
 mod cli;
 mod config;
+mod db;
 
 #[tokio::main]
 async fn main() {
@@ -39,8 +40,15 @@ async fn run() -> Result<()> {
         .timeout(Duration::from_secs(config.server.agent_timeout_secs))
         .build()
         .context("failed to build HTTP client")?;
-    let db = sled::open(&config.server.db_path)?;
-    let state = AppState { config, db, http };
+
+    let pool = db::connect(&config.server.db_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    db::migrate(&pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let state = AppState { config, pool, http };
 
     tracing_subscriber::fmt::init();
 

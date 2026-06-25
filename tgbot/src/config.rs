@@ -1,3 +1,6 @@
+use std::path::Path;
+
+use anyhow::Context;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use shared::AgentNode;
@@ -37,4 +40,12 @@ pub type NodeConfig = AgentNode;
 
 fn default_timeout() -> u64 {
     30
+}
+
+/// 从 TOML 文件加载配置
+pub fn load_config<P: AsRef<Path>>(path: P) -> anyhow::Result<Config> {
+    let content = std::fs::read_to_string(&path)?;
+    let config: Config = toml::from_str(&content)
+        .with_context(|| format!("Failed to load config: {}", path.as_ref().display()))?;
+    Ok(config)
 }

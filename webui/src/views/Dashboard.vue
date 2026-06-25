@@ -437,6 +437,7 @@ function formatTime(timestamp: number): string {
   background: transparent;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
+  color: var(--text-primary);
   font-size: 0.875rem;
   cursor: pointer;
   transition: all var(--transition-fast);
@@ -444,6 +445,7 @@ function formatTime(timestamp: number): string {
 
 .btn-action:hover:not(:disabled) {
   border-color: var(--text-tertiary);
+  background: var(--bg-hover);
 }
 
 .btn-action:disabled {
@@ -454,7 +456,7 @@ function formatTime(timestamp: number): string {
 .btn-action.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: var(--text-inverse);
+  color: #ffffff;
 }
 
 .btn-action.primary:hover:not(:disabled) {

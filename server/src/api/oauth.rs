@@ -6,7 +6,7 @@
 //! - Kioubit, scope: dn42
 //! - iEdon
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use axum::{
     Json,
@@ -24,17 +24,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::{AppState, OidcProvider, WebConfig};
+use crate::db::{self, oauth_states, sessions, users};
 use shared::AppError;
 
-const LOGIN_STATE_TREE: &str = "oauth_login_state";
-const SESSION_TREE: &str = "oauth_sessions";
-const LOGIN_STATE_TTL_SECS: u64 = 600;
+const LOGIN_STATE_TTL_SECS: i64 = 600;
 const SESSION_TTL_SECS: u64 = 8 * 60 * 60;
 const SESSION_COOKIE: &str = "daprs_session";
 
-// OAuth 客户端类型
+/// OAuth 客户端类型
 type OAuthClient =
     BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
+
+/// 会话上下文（中间件/handler 共用）
+#[derive(Clone, Copy)]
+pub struct SessionContext {
+    pub user_asn: u32,
+    pub issued_at: u64,
+    pub expires_at: u64,
+}
 
 // API Handlers
 /// 发起 OAuth 登录
@@ -60,12 +67,15 @@ pub async fn login(State(state): State<AppState>) -> Result<Redirect, AppError> 
 
     let (authorization_url, _) = auth_request.url();
 
-    let login_state = OAuthLoginState {
-        pkce_verifier: pkce_verifier.secret().to_string(),
-        created_at: now_unix_secs(),
-    };
-
-    persist_json(&state.db, LOGIN_STATE_TREE, &csrf_secret, &login_state)?;
+    let now = db::now_unix_secs();
+    oauth_states::create(
+        &state.pool,
+        &csrf_secret,
+        pkce_verifier.secret(),
+        provider_name(provider),
+        now + LOGIN_STATE_TTL_SECS,
+    )
+    .await?;
 
     Ok(Redirect::to(authorization_url.as_str()))
 }
@@ -90,7 +100,9 @@ pub async fn login_callback(
     let state_value = query
         .state
         .ok_or(AppError::BadRequest("missing state".into()))?;
-    let login_state = consume_login_state(&state, &state_value)?;
+    let login_state = oauth_states::consume(&state.pool, &state_value)
+        .await?
+        .ok_or(AppError::BadRequest("invalid or expired state".into()))?;
 
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -117,18 +129,27 @@ pub async fn login_callback(
         obj.insert("_asn".to_string(), Value::Number(asn.into()));
     }
 
-    let session_id = CsrfToken::new_random().secret().to_string();
-    let now = now_unix_secs();
-    let is_admin = state.config.server.admins.contains(&asn);
-    let session = OAuthSession {
-        userinfo: userinfo_with_asn,
-        asn,
-        is_admin,
-        issued_at: now,
-        expires_at: now + SESSION_TTL_SECS,
-    };
+    let userinfo_json = serde_json::to_string(&userinfo_with_asn)
+        .map_err(|e| AppError::InternalError(format!("userinfo encode: {e}")))?;
 
-    persist_json(&state.db, SESSION_TREE, &session_id, &session)?;
+    let (display_name, email, mntner) = extract_profile(&userinfo_with_asn);
+
+    // upsert 用户
+    users::upsert_on_login(
+        &state.pool,
+        asn as i64,
+        display_name.as_deref(),
+        email.as_deref(),
+        mntner.as_deref(),
+        &userinfo_json,
+    )
+    .await?;
+
+    // 创建会话
+    let now = db::now_unix_secs();
+    let session_id = CsrfToken::new_random().secret().to_string();
+    let expires_at = now + SESSION_TTL_SECS as i64;
+    sessions::create(&state.pool, &session_id, asn as i64, now, expires_at).await?;
 
     // 登录成功后重定向到前端地址
     let redirect_url = web.frontend_origin.as_deref().unwrap_or("/");
@@ -144,11 +165,16 @@ pub async fn me(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<MeResponse>, AppError> {
-    let session = require_session(&state, &headers)?;
+    let ctx = require_session(&state, &headers).await?;
+    let user = users::get(&state.pool, ctx.user_asn as i64)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+    let userinfo = users::parse_userinfo(&user)?;
+
     Ok(Json(MeResponse {
-        issued_at: session.issued_at,
-        expires_at: session.expires_at,
-        userinfo: session.userinfo,
+        issued_at: ctx.issued_at,
+        expires_at: ctx.expires_at,
+        userinfo,
     }))
 }
 
@@ -158,14 +184,7 @@ pub async fn logout(
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     if let Some(session_id) = extract_cookie(&headers, SESSION_COOKIE) {
-        let tree = state
-            .db
-            .open_tree(SESSION_TREE)
-            .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
-        tree.remove(session_id.as_bytes())
-            .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
-        tree.flush()
-            .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
+        sessions::delete(&state.pool, &session_id).await?;
     }
 
     let mut response = StatusCode::NO_CONTENT.into_response();
@@ -184,34 +203,33 @@ pub async fn require_auth_middleware(
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    require_session(&state, request.headers())?;
+    require_session(&state, request.headers()).await?;
     Ok(next.run(request).await)
 }
 
 // Helper Functions
 /// 从 Session 获取 ASN
-pub(crate) fn get_session_asn(session: &OAuthSession) -> u32 {
-    session.asn
+pub(crate) fn get_session_asn(ctx: &SessionContext) -> u32 {
+    ctx.user_asn
 }
 
 /// 检查 Session 是否为管理员
-pub(crate) fn is_session_admin(session: &OAuthSession) -> bool {
-    session.is_admin
+pub(crate) fn is_session_admin(state: &AppState, ctx: &SessionContext) -> bool {
+    state.config.server.admins.contains(&ctx.user_asn)
 }
 
 /// 验证是否为管理员
 ///
 /// 每次请求都重新检查配置中的管理员列表，确保权限变更立即生效
-pub(crate) fn require_admin(
+pub(crate) async fn require_admin(
     state: &AppState,
     headers: &HeaderMap,
-) -> Result<OAuthSession, AppError> {
-    let session = require_session(state, headers)?;
-    // 每次请求都重新检查，确保配置变更立即生效
-    if !state.config.server.admins.contains(&session.asn) {
+) -> Result<SessionContext, AppError> {
+    let ctx = require_session(state, headers).await?;
+    if !state.config.server.admins.contains(&ctx.user_asn) {
         return Err(AppError::Unauthorized);
     }
-    Ok(session)
+    Ok(ctx)
 }
 
 /// 从 userinfo 提取 ASN
@@ -223,53 +241,50 @@ fn extract_asn(userinfo: &Value) -> Option<u32> {
         .and_then(|n| u32::try_from(n).ok())
 }
 
+/// 从 userinfo 提取展示名/邮箱/mntner
+fn extract_profile(userinfo: &Value) -> (Option<String>, Option<String>, Option<String>) {
+    let str_field = |key: &str| -> Option<String> {
+        userinfo
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
+
+    let display_name = str_field("name")
+        .or_else(|| str_field("preferred_username"))
+        .or_else(|| str_field("nickname"));
+    let email = str_field("email");
+    let mntner = userinfo
+        .get("dn42")
+        .and_then(|d| d.get("mntner"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    (display_name, email, mntner)
+}
+
 /// 验证 Session
-pub(crate) fn require_session(
+pub(crate) async fn require_session(
     state: &AppState,
     headers: &HeaderMap,
-) -> Result<OAuthSession, AppError> {
+) -> Result<SessionContext, AppError> {
     let session_id = extract_cookie(headers, SESSION_COOKIE).ok_or(AppError::Unauthorized)?;
-    let tree = state
-        .db
-        .open_tree(SESSION_TREE)
-        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
 
-    let value = tree
-        .get(session_id.as_bytes())
-        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?
+    let session = sessions::get(&state.pool, &session_id)
+        .await?
         .ok_or(AppError::Unauthorized)?;
-    let session: OAuthSession = serde_json::from_slice(&value)
-        .map_err(|e| AppError::InternalError(format!("json error: {e}")))?;
 
-    if session.expires_at <= now_unix_secs() {
-        tree.remove(session_id.as_bytes())
-            .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
-        tree.flush()
-            .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
+    let now = db::now_unix_secs();
+    if session.expires_at <= now {
+        let _ = sessions::delete(&state.pool, &session_id).await;
         return Err(AppError::Unauthorized);
     }
 
-    Ok(session)
-}
-
-/// 持久化 JSON 数据
-pub(crate) fn persist_json<T: Serialize>(
-    db: &sled::Db,
-    tree_name: &str,
-    key: &str,
-    value: &T,
-) -> Result<(), AppError> {
-    let tree = db
-        .open_tree(tree_name)
-        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
-    let encoded = serde_json::to_vec(value)
-        .map_err(|e| AppError::InternalError(format!("json error: {e}")))?;
-
-    tree.insert(key.as_bytes(), encoded)
-        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
-    tree.flush()
-        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
-    Ok(())
+    Ok(SessionContext {
+        user_asn: session.user_asn as u32,
+        issued_at: session.issued_at as u64,
+        expires_at: session.expires_at as u64,
+    })
 }
 
 /// 创建 OAuth 客户端
@@ -365,29 +380,6 @@ async fn fetch_userinfo(
         .map_err(|e| AppError::InternalError(format!("userinfo parse error: {e}")))
 }
 
-/// 消费登录状态
-fn consume_login_state(state: &AppState, csrf_state: &str) -> Result<OAuthLoginState, AppError> {
-    let tree = state
-        .db
-        .open_tree(LOGIN_STATE_TREE)
-        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
-
-    let value = tree
-        .remove(csrf_state.as_bytes())
-        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?
-        .ok_or(AppError::BadRequest("invalid or expired state".into()))?;
-    tree.flush()
-        .map_err(|e| AppError::InternalError(format!("db error: {e}")))?;
-
-    let login_state: OAuthLoginState = serde_json::from_slice(&value)
-        .map_err(|e| AppError::InternalError(format!("json error: {e}")))?;
-    if now_unix_secs() > login_state.created_at + LOGIN_STATE_TTL_SECS {
-        return Err(AppError::BadRequest("state expired".into()));
-    }
-
-    Ok(login_state)
-}
-
 /// 从 Cookie 中提取值
 fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
@@ -450,12 +442,12 @@ fn session_cookie_attrs(web: &WebConfig) -> SessionCookieAttrs {
     }
 }
 
-/// 获取当前 Unix 时间戳
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+/// provider 名称字符串
+fn provider_name(p: OidcProvider) -> &'static str {
+    match p {
+        OidcProvider::Kioubit => "kioubit",
+        OidcProvider::IEdon => "iedon",
+    }
 }
 
 // 类型
@@ -473,28 +465,6 @@ pub struct OAuthCallbackQuery {
     pub code: Option<String>,
     pub state: Option<String>,
     pub error: Option<String>,
-}
-
-/// OAuth 登录状态
-#[derive(Serialize, Deserialize)]
-struct OAuthLoginState {
-    pkce_verifier: String,
-    created_at: u64,
-}
-
-/// OAuth Session
-#[derive(Serialize, Deserialize, Clone)]
-pub struct OAuthSession {
-    /// 用户信息
-    pub userinfo: Value,
-    /// 登录 ASN
-    pub asn: u32,
-    /// 是否为管理员
-    pub is_admin: bool,
-    /// 签发时间
-    pub issued_at: u64,
-    /// 过期时间
-    pub expires_at: u64,
 }
 
 /// 用户信息响应
