@@ -9,6 +9,7 @@ use teloxide::dptree;
 use teloxide::prelude::*;
 use teloxide::types::{CallbackQuery, Message, Update};
 use tokio::sync::Mutex;
+use tracing::info;
 
 use crate::agent::AgentClient;
 use crate::cache::Cache;
@@ -36,6 +37,8 @@ async fn run() -> anyhow::Result<()> {
     let config = Arc::new(config::load_config(&cli.config)?);
 
     tracing_subscriber::fmt::init();
+
+    info!("Starting DAPRS TgBot v{}...", env!("CARGO_PKG_VERSION"));
 
     let bot = Bot::from_env();
     let cache: Cache = Arc::new(Mutex::new(HashMap::new()));

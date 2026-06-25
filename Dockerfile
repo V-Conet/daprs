@@ -9,7 +9,7 @@ ENTRYPOINT ["/app/server"]
 
 
 # agent
-FROM alpine:3.23 AS agent
+FROM alpine:3.24 AS agent
 
 RUN apk update && apk add --no-cache bird
 
@@ -25,3 +25,15 @@ RUN wget https://github.com/pouriyajamshidi/tcping/releases/download/v2.8.0/tcpi
     rm tcping.tar.gz
 
 ENTRYPOINT ["/app/agent"]
+
+
+# tgbot
+FROM alpine:3.24 AS tgbot
+
+RUN apk update && apk add --no-cache ca-certificates
+
+WORKDIR /app
+
+COPY target/x86_64-unknown-linux-musl/release/tgbot /app/tgbot
+
+ENTRYPOINT ["/app/tgbot"]
