@@ -160,7 +160,8 @@ async fn run() -> Result<()> {
     let app = app.with_state(state);
 
     info!(
-        "Server is running on http://{} with db {}",
+        "DAPRS Server v{}, running on http://{} with db {}",
+        env!("CARGO_PKG_VERSION"),
         listener.local_addr().unwrap(),
         db_path
     );

@@ -15,7 +15,6 @@ pub type Cache = Arc<Mutex<HashMap<String, CacheEntry>>>;
 
 /// 一次命令在所有节点上的结果
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct CacheEntry {
     /// 缓存 ID（callback data 用），存入 entry 以保证端到端一致
     pub cache_id: String,
@@ -33,7 +32,6 @@ pub struct CacheEntry {
 
 /// 单个节点的命令结果
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct NodeResult {
     pub node: String,
     pub output: CmdOutput,

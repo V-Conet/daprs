@@ -11,7 +11,6 @@ ENTRYPOINT ["/app/server"]
 # agent
 FROM alpine:3.24 AS agent
 
-RUN apk update && apk add --no-cache bird
 
 RUN apk add --no-cache bird wireguard-tools bind-tools
 
@@ -28,12 +27,22 @@ ENTRYPOINT ["/app/agent"]
 
 
 # tgbot
-FROM alpine:3.24 AS tgbot
+FROM debian:trixie-slim AS tgbot
 
-RUN apk update && apk add --no-cache ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    fonts-liberation \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+## get custom ttf for CJK
+RUN wget "https://raw.githubusercontent.com/ZaneL1u/TTF-Min/main/dist/ttf-%E6%80%9D%E6%BA%90%E9%BB%91%E4%BD%93/SourceHanSansSC-Regular.ttf" -O /usr/share/fonts/SourceHanSansSC-Regular_ttfmin.ttf
 
 WORKDIR /app
 
 COPY target/x86_64-unknown-linux-musl/release/tgbot /app/tgbot
+
+# headless_chrome won't recognize chromium-headless-shell
+ENV CHROME=/usr/bin/chromium-headless-shell
 
 ENTRYPOINT ["/app/tgbot"]

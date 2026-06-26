@@ -52,7 +52,9 @@ pub async fn consume(pool: &SqlitePool, state: &str) -> Result<Option<OAuthLogin
     .await
     .map_err(map_db_err)?;
 
-    if let Some(ref r) = row && super::now_unix_secs() > r.expires_at {
+    if let Some(ref r) = row
+        && super::now_unix_secs() > r.expires_at
+    {
         return Ok(None);
     }
     Ok(row)

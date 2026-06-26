@@ -8,7 +8,7 @@ bind = "0.0.0.0:8080"
 api_token = "TOKEN"
 # keepalive time in seconds
 alive = 60
-# sled database path
+# sqlite database path
 db_path = "daprs.db"
 # Agent request timeout in seconds
 agent_timeout_secs = 15

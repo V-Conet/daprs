@@ -91,7 +91,8 @@ async fn run() -> Result<()> {
     let app = public_routes.merge(protected_routes);
 
     info!(
-        "Agent is running on http://{}",
+        "DAPRS Agent v{}, running on http://{}",
+        env!("CARGO_PKG_VERSION"),
         listener.local_addr().unwrap()
     );
 

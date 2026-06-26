@@ -36,9 +36,11 @@ async fn run() -> anyhow::Result<()> {
     let cli = config::Cli::parse();
     let config = Arc::new(config::load_config(&cli.config)?);
 
+    config::init_config((*config).clone());
+
     tracing_subscriber::fmt::init();
 
-    info!("Starting DAPRS TgBot v{}...", env!("CARGO_PKG_VERSION"));
+    info!("DAPRS TgBot v{}", env!("CARGO_PKG_VERSION"));
 
     let bot = Bot::from_env();
     let cache: Cache = Arc::new(Mutex::new(HashMap::new()));

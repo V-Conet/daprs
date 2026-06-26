@@ -1,10 +1,11 @@
 //! 命令路由、Trait 与注册表
 //!
-//! `Command` enum 是 teloxide 路由入口（无逻辑）；每个变体经 `Registry`
+//! `Command` enum 是 teloxide 路由入口；每个变体经 `Registry`
 //! 映射到一个 `TgCommand` impl。加新命令 = enum 加变体 + 新建命令文件 +
 //! `Registry::build()` 加一行 insert。
 
 pub mod dig;
+pub mod flaps;
 pub mod path;
 pub mod peer;
 pub mod ping;
@@ -18,12 +19,13 @@ use std::mem::discriminant;
 use std::sync::Arc;
 
 use teloxide::prelude::*;
+use teloxide::types::InputFile;
 use teloxide::utils::command::BotCommands;
 
 use crate::agent::AgentClient;
 use crate::cache::Cache;
 use crate::error::ResponseResult;
-use crate::flow;
+use crate::flow::{self, ReplyType};
 
 // teloxide 命令路由入口
 #[derive(BotCommands, Clone, Debug)]
@@ -46,6 +48,8 @@ pub enum Command {
     Route,
     #[command(description = "Show AS path to target: /path <target>")]
     Path,
+    #[command(description = "FlapAlerted info")]
+    Flaps,
     #[command(description = "Peering info")]
     Peer,
 }
@@ -58,13 +62,23 @@ pub enum ParseResult {
         target: String,
         placeholder: String,
     },
-    /// 直接回复静态文本（不调用 agent），用于 /start /peer 等
-    Reply(String),
-    /// 用法错误，直接回复文本（不调用 agent）
+    /// 回复文本
+    Reply {
+        text: String,
+        placeholder: Option<String>,
+    },
+    /// 回复图片
+    ReplyImage {
+        data: Vec<u8>,
+        placeholder: Option<String>,
+    },
+    /// 用法错误，直接回复文本
     Usage(String),
 }
 
-/// 一个诊断命令：从消息文本解析参数并构造 shared::Cmd。
+// impl
+
+/// 从消息文本解析参数并构造 shared::Cmd。
 ///
 /// `/help` 不是 TgCommand，由 [`dispatch`] 直接处理。
 pub trait TgCommand: Send + Sync {
@@ -77,7 +91,7 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// 注册所有诊断命令
+    /// 注册所有命令
     pub fn build() -> Self {
         let mut map = HashMap::new();
         map.insert(
@@ -91,6 +105,7 @@ impl Registry {
         map.insert(discriminant(&Command::Route), Arc::new(route::Route));
         map.insert(discriminant(&Command::Path), Arc::new(path::Path));
         map.insert(discriminant(&Command::Peer), Arc::new(peer::Peer));
+        map.insert(discriminant(&Command::Flaps), Arc::new(flaps::Flaps));
         Self { map }
     }
 
@@ -110,7 +125,6 @@ pub async fn dispatch(
 ) -> ResponseResult<()> {
     if matches!(cmd, Command::Help) {
         // Command::descriptions() 实现 Display；用纯文本发送，
-        // 避免 MarkdownV2 对 — . 等字符的转义要求
         let help = format!("🤖 DN42 Network Tools Bot\n\n{}", Command::descriptions());
         bot.send_message(msg.chat.id, help).await?;
         return Ok(());
@@ -127,10 +141,21 @@ pub async fn dispatch(
             target,
             placeholder,
         } => {
-            flow::run_command(&bot, &msg, &agent, &cache, placeholder, target, cmd).await?;
+            flow::run_cmd_agents(&bot, &msg, &agent, &cache, placeholder, target, cmd).await?;
         }
-        ParseResult::Reply(r) => {
-            bot.send_message(msg.chat.id, r).await?;
+        ParseResult::Reply { text, placeholder } => {
+            if let Some(ph) = placeholder {
+                flow::run_cmd(&bot, &msg, ph, ReplyType::Text(text)).await?;
+            } else {
+                bot.send_message(msg.chat.id, text).await?;
+            }
+        }
+        ParseResult::ReplyImage { data, placeholder } => {
+            if let Some(ph) = placeholder {
+                flow::run_cmd(&bot, &msg, ph, ReplyType::Image(data)).await?;
+            } else {
+                bot.send_photo(msg.chat.id, InputFile::memory(data)).await?;
+            }
         }
         ParseResult::Usage(u) => {
             bot.send_message(msg.chat.id, u).await?;

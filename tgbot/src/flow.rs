@@ -6,20 +6,29 @@ use std::time::Instant;
 
 use futures::future::join_all;
 use teloxide::prelude::*;
-use teloxide::types::{CallbackQuery, ParseMode, ReplyParameters};
+use teloxide::types::{
+    CallbackQuery, InputFile, InputMedia, InputMediaPhoto, ParseMode, ReplyParameters,
+};
 
 use crate::agent::AgentClient;
 use crate::cache::{self, Cache, CacheEntry, NodeResult, gen_id};
 use crate::error::ResponseResult;
 use crate::message::{build_keyboard, format_result, msg_ids, parse_callback_data};
 
+pub enum ReplyType {
+    Text(String),
+    Image(Vec<u8>),
+}
+
 /// 执行命令流程
 ///
-/// 1. 发送 placeholder（引用用户消息）
+/// 1. 发送 placeholder
 /// 2. 在所有节点并发执行
 /// 3. 缓存结果
 /// 4. 原地 edit placeholder 为首节点结果 + 节点切换 keyboard
-pub async fn run_command(
+///
+/// parse_mode: MarkdownV2
+pub async fn run_cmd_agents(
     bot: &Bot,
     msg: &Message,
     agent: &AgentClient,
@@ -40,7 +49,7 @@ pub async fn run_command(
         .reply_parameters(ReplyParameters::new(msg.id))
         .await?;
 
-    // 2. 全节点并发执行（保序）
+    // 2. 全节点并发执行
     let futs = nodes.iter().map(|name| {
         let name = name.clone();
         let cmd = cmd.clone();
@@ -74,6 +83,44 @@ pub async fn run_command(
         .parse_mode(ParseMode::MarkdownV2)
         .reply_markup(keyboard)
         .await?;
+
+    Ok(())
+}
+
+/// 执行命令流程（will not dispatch to agent）
+/// 1. 发送 placeholder
+/// 2. 原地 edit placeholder 为结果
+///
+/// type: PlainText/Image
+pub async fn run_cmd(
+    bot: &Bot,
+    msg: &Message,
+    placeholder: String,
+    data: ReplyType,
+) -> ResponseResult<()> {
+    // 1. placeholder，引用用户消息
+    let placeholder_msg = bot
+        .send_message(msg.chat.id, placeholder)
+        .reply_parameters(ReplyParameters::new(msg.id))
+        .await?;
+
+    // 2. 原地 edit placeholder：结果
+
+    match data {
+        ReplyType::Text(text) => {
+            bot.edit_message_text(msg.chat.id, placeholder_msg.id, text)
+                .parse_mode(ParseMode::MarkdownV2)
+                .await?;
+        }
+        ReplyType::Image(img) => {
+            bot.edit_message_media(
+                msg.chat.id,
+                placeholder_msg.id,
+                InputMedia::Photo(InputMediaPhoto::new(InputFile::memory(img))),
+            )
+            .await?;
+        }
+    }
 
     Ok(())
 }

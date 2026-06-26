@@ -8,6 +8,22 @@ timeout = 30
 
 # Bot token is read from TELOXIDE_TOKEN environment variable
 
+[tgbot.settings]
+start_msg = """
+🤖 DN42 Network Tools Bot
+
+Welcome! This bot provides network diagnostic tools.
+Use /help to see available commands.
+
+你好！这是一个网络诊断工具机器人。
+使用 /help 查看可用命令。
+
+Bot is opensourced at: https://github.com/V-Conet/daprs
+"""
+
+flap_url = "http://flapalerted"
+
+
 [[agent.nodes]]
 name = "node1"
 address = "http://127.0.0.1:9813"
