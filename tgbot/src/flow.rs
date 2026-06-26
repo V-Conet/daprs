@@ -9,15 +9,18 @@ use teloxide::prelude::*;
 use teloxide::types::{
     CallbackQuery, InputFile, InputMedia, InputMediaPhoto, ParseMode, ReplyParameters,
 };
+use tracing::error;
 
 use crate::agent::AgentClient;
 use crate::cache::{self, Cache, CacheEntry, NodeResult, gen_id};
+use crate::commands::escape_markdown_v2;
 use crate::error::ResponseResult;
 use crate::message::{build_keyboard, format_result, msg_ids, parse_callback_data};
 
 pub enum ReplyType {
     Text(String),
-    Image(Vec<u8>),
+    /// 闭包在 `spawn_blocking` 上执行，避免阻塞 dispatcher
+    Image(Box<dyn FnOnce() -> anyhow::Result<Vec<u8>> + Send>),
 }
 
 /// 执行命令流程
@@ -95,33 +98,82 @@ pub async fn run_cmd_agents(
 pub async fn run_cmd(
     bot: &Bot,
     msg: &Message,
-    placeholder: String,
+    placeholder: Option<String>,
     data: ReplyType,
 ) -> ResponseResult<()> {
-    // 1. placeholder，引用用户消息
-    let placeholder_msg = bot
-        .send_message(msg.chat.id, placeholder)
-        .reply_parameters(ReplyParameters::new(msg.id))
-        .await?;
-
-    // 2. 原地 edit placeholder：结果
-
-    match data {
-        ReplyType::Text(text) => {
-            bot.edit_message_text(msg.chat.id, placeholder_msg.id, text)
-                .parse_mode(ParseMode::MarkdownV2)
+    match placeholder {
+        Some(ph) => {
+            // 1. placeholder，引用用户消息
+            let placeholder_msg = bot
+                .send_message(msg.chat.id, ph)
+                .reply_parameters(ReplyParameters::new(msg.id))
                 .await?;
+
+            // 2. 原地 edit placeholder：结果
+            match data {
+                ReplyType::Text(text) => {
+                    let text = escape_markdown_v2(text);
+                    bot.edit_message_text(msg.chat.id, placeholder_msg.id, text)
+                        .parse_mode(ParseMode::MarkdownV2)
+                        .await?;
+                }
+                ReplyType::Image(capture) => {
+                    // 阻塞线程池，placeholder 已发出，dispatcher 不受阻塞
+                    match tokio::task::spawn_blocking(capture).await {
+                        Ok(Ok(img)) => {
+                            bot.edit_message_media(
+                                msg.chat.id,
+                                placeholder_msg.id,
+                                InputMedia::Photo(InputMediaPhoto::new(InputFile::memory(img))),
+                            )
+                            .await?;
+                        }
+                        Ok(Err(e)) => {
+                            let err = format!("截图失败: {e}");
+                            error!("{}", &err);
+                            bot.edit_message_text(msg.chat.id, placeholder_msg.id, err)
+                                .await?;
+                        }
+                        Err(e) => {
+                            let err = format!("截图任务异常: {e}");
+                            error!("{}", &err);
+                            bot.edit_message_text(msg.chat.id, placeholder_msg.id, err)
+                                .await?;
+                        }
+                    }
+                }
+            }
         }
-        ReplyType::Image(img) => {
-            bot.edit_message_media(
-                msg.chat.id,
-                placeholder_msg.id,
-                InputMedia::Photo(InputMediaPhoto::new(InputFile::memory(img))),
-            )
-            .await?;
+        None => {
+            // No placeholder, send result directly
+            match data {
+                ReplyType::Text(text) => {
+                    let text = escape_markdown_v2(text);
+                    bot.send_message(msg.chat.id, text)
+                        .parse_mode(ParseMode::MarkdownV2)
+                        .await?;
+                }
+                ReplyType::Image(capture) => {
+                    // 阻塞线程池，placeholder 已发出，dispatcher 不受阻塞
+                    match tokio::task::spawn_blocking(capture).await {
+                        Ok(Ok(img)) => {
+                            bot.send_photo(msg.chat.id, InputFile::memory(img)).await?;
+                        }
+                        Ok(Err(e)) => {
+                            let err = format!("截图失败: {e}");
+                            error!("{}", &err);
+                            bot.send_message(msg.chat.id, err).await?;
+                        }
+                        Err(e) => {
+                            let err = format!("截图任务异常: {e}");
+                            error!("{}", &err);
+                            bot.send_message(msg.chat.id, err).await?;
+                        }
+                    }
+                }
+            }
         }
     }
-
     Ok(())
 }
 

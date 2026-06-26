@@ -2,18 +2,18 @@
 //!
 //! 用法：/dig <domain> [@server] [type]
 
-use crate::commands::{ParseResult, TgCommand};
+use crate::commands::{MsgType, TgCommand};
 
 pub struct Dig;
 
 impl TgCommand for Dig {
-    fn parse(&self, text: &str) -> ParseResult {
+    fn parse(&self, text: &str) -> MsgType {
         let mut parts = text.split_whitespace().skip(1);
 
         let target = match parts.next() {
             Some(t) => t.to_string(),
             None => {
-                return ParseResult::Usage("Usage: /dig <domain> [@server] [type]".into());
+                return MsgType::Usage("Usage: /dig <domain> [@server] [type]".into());
             }
         };
 
@@ -43,7 +43,7 @@ impl TgCommand for Dig {
         let placeholder =
             format!("⏳ DNS lookup for {target} (type: {qtype_str}, server: {server_info})...");
 
-        ParseResult::Run {
+        MsgType::Run {
             target: target.clone(),
             placeholder,
             cmd: shared::Cmd::Dig {

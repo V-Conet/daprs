@@ -18,6 +18,8 @@ use std::collections::HashMap;
 use std::mem::discriminant;
 use std::sync::Arc;
 
+use anyhow::anyhow;
+use teloxide::dispatching::dialogue::GetChatId;
 use teloxide::prelude::*;
 use teloxide::types::InputFile;
 use teloxide::utils::command::BotCommands;
@@ -55,7 +57,7 @@ pub enum Command {
 }
 
 /// 命令解析结果
-pub enum ParseResult {
+pub enum MsgType {
     /// 在所有节点执行 cmd，并 edit placeholder 展示结果
     Run {
         cmd: shared::Cmd,
@@ -69,7 +71,7 @@ pub enum ParseResult {
     },
     /// 回复图片
     ReplyImage {
-        data: Vec<u8>,
+        capture: Box<dyn FnOnce() -> anyhow::Result<Vec<u8>> + Send>,
         placeholder: Option<String>,
     },
     /// 用法错误，直接回复文本
@@ -82,7 +84,7 @@ pub enum ParseResult {
 ///
 /// `/help` 不是 TgCommand，由 [`dispatch`] 直接处理。
 pub trait TgCommand: Send + Sync {
-    fn parse(&self, text: &str) -> ParseResult;
+    fn parse(&self, text: &str) -> MsgType;
 }
 
 /// 命令注册表：Command 变体 -> 处理器
@@ -136,31 +138,40 @@ pub async fn dispatch(
 
     let text = msg.text().unwrap_or_default();
     match handler.parse(text) {
-        ParseResult::Run {
+        MsgType::Run {
             cmd,
             target,
             placeholder,
         } => {
             flow::run_cmd_agents(&bot, &msg, &agent, &cache, placeholder, target, cmd).await?;
         }
-        ParseResult::Reply { text, placeholder } => {
-            if let Some(ph) = placeholder {
-                flow::run_cmd(&bot, &msg, ph, ReplyType::Text(text)).await?;
-            } else {
-                bot.send_message(msg.chat.id, text).await?;
-            }
+        MsgType::Reply { text, placeholder } => {
+            flow::run_cmd(&bot, &msg, placeholder, ReplyType::Text(text)).await?;
         }
-        ParseResult::ReplyImage { data, placeholder } => {
-            if let Some(ph) = placeholder {
-                flow::run_cmd(&bot, &msg, ph, ReplyType::Image(data)).await?;
-            } else {
-                bot.send_photo(msg.chat.id, InputFile::memory(data)).await?;
-            }
+        MsgType::ReplyImage {
+            capture,
+            placeholder,
+        } => {
+            flow::run_cmd(&bot, &msg, placeholder, ReplyType::Image(capture)).await?;
         }
-        ParseResult::Usage(u) => {
+        MsgType::Usage(u) => {
             bot.send_message(msg.chat.id, u).await?;
         }
     }
-
     Ok(())
+}
+
+/// Temporary escape for MarkdownV2
+pub fn escape_markdown_v2(text: String) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '.' => {
+                escaped.push('\\');
+                escaped.push(c);
+            }
+            _ => escaped.push(c),
+        }
+    }
+    escaped
 }

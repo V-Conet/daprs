@@ -3,16 +3,16 @@
 //! 静态欢迎信息，不调用 agent。
 
 use crate::{
-    commands::{ParseResult, TgCommand},
+    commands::{MsgType, TgCommand},
     config,
 };
 
 pub struct Start;
 
 impl TgCommand for Start {
-    fn parse(&self, _text: &str) -> ParseResult {
+    fn parse(&self, _text: &str) -> MsgType {
         // 读取配置文件中的 start_msg
-        ParseResult::Reply {
+        MsgType::Reply {
             text: (config::config()
                 .lock()
                 .unwrap()
